@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>scribe</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23231f1c'/%3E%3Cpath d='M8 22V10h3.2l4.8 8 4.8-8H24v12' stroke='%23e8834a' stroke-width='2.4' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+    <script src="/static/theme-boot.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <span class="dot" id="conn-dot" title="connection"></span>
+          <b>scribe</b>
+          <span class="spacer"></span>
+          <button class="btn" id="theme-toggle" title="Theme (t)" aria-label="Toggle theme">◐</button>
+        </div>
+        <div class="sidebar-search">
+          <input
+            id="session-filter"
+            type="search"
+            placeholder="search all conversations…"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+        <nav class="session-list" id="session-list" aria-label="Sessions"></nav>
+      </aside>
+
+      <div class="main">
+        <header class="topbar">
+          <button class="btn hidden" id="menu-toggle" aria-label="Sessions">☰</button>
+          <span class="title" id="session-title">scribe</span>
+          <span class="facts chrome" id="session-facts"></span>
+          <span class="spacer"></span>
+          <div class="find">
+            <input id="find-input" type="search" placeholder="find…" autocomplete="off" spellcheck="false" />
+            <span class="count" id="find-count"></span>
+          </div>
+          <button class="btn" id="arm-toggle" aria-pressed="false" title="Approve tool calls from this page">
+            approvals
+          </button>
+          <button class="btn" id="collapse-toggle" title="Collapse or expand all tool calls">fold</button>
+          <button class="btn" id="log-link" title="Copy the markdown log path">.md</button>
+          <div id="progress"></div>
+        </header>
+
+        <main class="stage" id="stage">
+          <div class="column" id="column"></div>
+          <div class="rail" id="rail">
+            <svg id="tethers" aria-hidden="true"></svg>
+            <div class="rail-inner" id="rail-inner"></div>
+          </div>
+        </main>
+
+        <div class="dock" id="dock" hidden>
+          <div class="dock-inner">
+            <div class="queue" id="queue"></div>
+            <form class="compose" id="compose">
+              <textarea
+                id="compose-input"
+                rows="1"
+                placeholder="reply from here — delivered when Claude finishes this turn…"
+                spellcheck="true"
+              ></textarea>
+              <button class="btn" type="submit" id="compose-send">send</button>
+            </form>
+            <div class="dock-note" id="dock-note"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <button class="follow-pill" id="follow-pill" data-show="false">
+      <span>↓</span><span id="follow-label">jump to latest</span>
+    </button>
+
+    <script src="/static/marked.min.js"></script>
+    <script src="/static/rail.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

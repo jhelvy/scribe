@@ -1,0 +1,53 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # POSIX only: the hook talks to the daemon over an AF_UNIX socket, and
+    # `serve --background` double-forks. Windows is documented as unsupported
+    # for those two paths rather than silently broken here.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # The floor and the ceiling. `requires-python = ">=3.9"` is only an
+        # honest claim if 3.9 is actually exercised.
+        python-version: ["3.9", "3.13"]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Python suite
+        run: python -m unittest discover -s tests -t tests -v
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Rail layout solver
+        run: node tests/test_rail.mjs
+
+      - name: Viewer parses
+        run: |
+          for f in scribe/viewer/*.js; do node --check "$f"; done
+
+      - name: CLI smoke test
+        run: |
+          ./bin/scribe --version
+          ./bin/scribe status
+          ./bin/scribe list --all
+        env:
+          # Never let a CI run touch a real ~/.scribe or ~/.claude.
+          SCRIBE_HOME: ${{ runner.temp }}/scribe-home
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude

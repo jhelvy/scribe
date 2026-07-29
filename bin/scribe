@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""scribe entry point.
+
+Kept trivial so the package can live anywhere: the CLI is importable from a
+checkout without installation, which is how the hooks reference it too.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from scribe.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

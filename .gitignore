@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+
+# Test and tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# scribe's own data, in case SCRIBE_HOME ever points at the checkout.
+# These hold real conversation transcripts — never commit them.
+.scribe/
+archive/
+logs/
+index.db
+index.db-wal
+index.db-shm
+*.jsonl
+scribe-export-*.html
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
