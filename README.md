@@ -9,7 +9,7 @@ scribe serve       # open the viewer
 ```
 
 Python 3 standard library only. Nothing here writes to a transcript, and
-nothing enters the session's context window.
+recording adds nothing to the session's context window.
 
 ---
 
@@ -88,24 +88,70 @@ turn ends.
 
 ## Install
 
-Requires `python3` (3.9+) and Claude Code. No dependencies.
+Requires `python3` (3.9+) and Claude Code. No dependencies. macOS and Linux;
+on Windows see [Things worth knowing](#things-worth-knowing).
+
+```bash
+uv tool install git+https://github.com/jhelvy/scribe
+```
+
+or `pipx install git+https://github.com/jhelvy/scribe`, or
+`pip install git+https://github.com/jhelvy/scribe` into a virtualenv. Any of
+them puts a `scribe` command on your PATH. Then, in this order:
+
+```bash
+scribe archive     # 1. back up everything you still have, right now
+scribe install     # 2. register hooks in ~/.claude/settings.json
+scribe serve       # 3. start the daemon and open the viewer
+```
+
+**Do step 1 first.** It is the only step with a deadline: it copies transcripts
+that Claude Code may delete out from under you, and nothing else here can bring
+those back. It is also safe to run at any time, on a machine where scribe is
+not yet installed, and repeatedly.
+
+Step 2 backs `settings.json` up first, writes *through* a symlink rather than
+replacing it (dotfiles setups keep working), and only touches entries it
+recognises as its own. `scribe install --dry-run` shows the diff without
+writing; `scribe install --uninstall` restores exactly what was there before,
+leaving the archive intact.
+
+After step 2 the daemon starts itself whenever a session begins, so step 3 is
+only needed the first time — after that, `scribe open`.
+
+<details>
+<summary><b>Running from a clone instead</b></summary>
+
+No install step; `bin/scribe` runs straight out of the working tree.
 
 ```bash
 git clone https://github.com/jhelvy/scribe
 cd scribe
-./bin/scribe archive          # back up everything you still have, right now
-./bin/scribe install          # register hooks in ~/.claude/settings.json
-./bin/scribe serve            # start the daemon and open the viewer
+./bin/scribe archive
+./bin/scribe install     # registers this checkout's path with Claude Code
+./bin/scribe serve
 ```
 
-Run `scribe archive` before anything else. It is the step with a deadline.
+Everywhere this README says `scribe`, use `./bin/scribe`. Note that `install`
+writes the checkout's absolute path into `settings.json`, so moving or deleting
+the clone breaks the hooks until you re-run it.
 
-`install` backs the settings file up first, writes *through* a symlink rather
-than replacing it (dotfiles setups keep working), and only touches entries it
-recognises as its own. `--uninstall` restores exactly what was there before;
-`--dry-run` shows the diff without writing.
+</details>
 
-Once installed, the daemon starts itself when a session begins.
+### Where it puts things
+
+Everything lives in `~/.scribe`, mode `0700`, outside every repository:
+
+```
+~/.scribe/archive/     the permanent byte-for-byte copies — the irreplaceable part
+~/.scribe/logs/        rendered markdown, one file per session (regenerable)
+~/.scribe/index.db     the search index (regenerable)
+~/.scribe/config.json  settings
+```
+
+Only `archive/` holds anything that cannot be rebuilt. Back up that directory
+and you have kept everything; `scribe build --all` regenerates the rest.
+`SCRIBE_HOME` moves the whole tree elsewhere.
 
 ---
 
@@ -195,6 +241,10 @@ tools.
 the turn ends. Guards: `stop_hook_active` is honoured so a blocked stop never
 triggers another, and `reply_queue.max_chain` (default 5) caps consecutive
 injections. A prompt typed in the terminal resets the count.
+
+This is the one feature that puts text *into* a conversation. A queued reply
+enters the context window exactly as a typed one would — which is the point of
+it, but it is why the blanket claim at the top of this file is about recording.
 
 ---
 

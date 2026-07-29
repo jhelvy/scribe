@@ -18,7 +18,7 @@ indent_size = 2
 # Markdown uses trailing double-space for hard breaks
 trim_trailing_whitespace = false
 
-[viewer/marked.min.js]
+[scribe/viewer/marked.min.js]
 # Vendored, MIT. Do not reformat.
 insert_final_newline = false
 trim_trailing_whitespace = false
