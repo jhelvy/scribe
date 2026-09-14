@@ -211,7 +211,7 @@ class Round:
     ts: str = ""
     end_ts: str = ""
     prompt: str = ""
-    source: str = "user"  # user | web | command | system
+    source: str = "user"  # user | web | peer | command | system
     items: list = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
     duration_ms: int = 0

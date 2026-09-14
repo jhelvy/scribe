@@ -212,7 +212,9 @@ class MarkdownRenderer:
 
     def _round(self, rnd: Round, session: Session, level: int = 2) -> str:
         hashes = "#" * level
-        who = {"web": "You (web)", "system": "Session", "command": "You"}.get(rnd.source, "You")
+        who = {"web": "You (web)", "peer": "Another session", "system": "Session", "command": "You"}.get(
+            rnd.source, "You"
+        )
         out = [f"\n{hashes} {rnd.index} · {who}", ""]
 
         meta = [f"`{fmt_time(rnd.ts)}`"]

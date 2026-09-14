@@ -384,7 +384,8 @@ def clean(text: str) -> str:
 _CLAUDE_PATH: str | None = None
 
 
-def _find_claude() -> str | None:
+def find_claude() -> str | None:
+    """The Claude Code binary, or None. Cached after the first lookup."""
     global _CLAUDE_PATH
     if _CLAUDE_PATH is not None:
         return _CLAUDE_PATH or None
@@ -402,3 +403,6 @@ def _find_claude() -> str | None:
                 break
     _CLAUDE_PATH = found
     return found or None
+
+
+_find_claude = find_claude

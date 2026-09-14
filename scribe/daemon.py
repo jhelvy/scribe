@@ -40,6 +40,7 @@ from . import (
     control,
     explain,
     paths,
+    peer,
     redact,
     render_json,
     search,
@@ -62,6 +63,8 @@ LIVE_S = 2 * 3600
 #: Without hooks there is no presence signal at all, so a transcript that
 #: changed this recently is presumed to have a process behind it.
 LIVE_GRACE_S = 600
+#: How long the session-inbox registry is trusted before it is re-read.
+PEERS_TTL_S = 2.0
 
 
 # ==================================================================== hub
@@ -233,6 +236,10 @@ class Hub:
         self.presence: dict[str, float] = {}
         self.ended: set[str] = set()
         self.attention: dict[str, str] = {}  # session_id -> last Notification type
+        # Sessions a `claude -p --resume` child is working on right now.
+        self.resuming: dict[str, float] = {}
+        self._peers: dict[str, peer.Peer] = {}
+        self._peers_at = 0.0
         self._card_sig: dict[str, str] = {}
         self._explain_origin: dict[str, str] = {}  # call_id -> session, for on-demand
         self._lock = threading.RLock()
@@ -282,6 +289,10 @@ class Hub:
     def is_live(self, ref: transcript.SessionRef, now: float | None = None) -> bool:
         now = now or time.time()
         sid = ref.session_id
+        # A session with an inbox has a process behind it by definition, and a
+        # resume child is one too. Both are known without any hook.
+        if sid in self.peers() or sid in self.resuming:
+            return True
         if sid in self.ended:
             return False
         seen = self.presence.get(sid)
@@ -336,6 +347,11 @@ class Hub:
             phase = state["phase"]
         if phase == "working" and state.get("mode") == "plan":
             phase = "planning"
+        if sid in self.resuming and phase in ("done", "your_turn"):
+            # The child is starting; the prompt has not reached the file yet.
+            phase = "working"
+            state["activity"] = "starting Claude"
+            state["activity_kind"] = "wait"
 
         item["live"] = alive
         item["armed"] = self.control.is_armed(sid)
@@ -343,6 +359,7 @@ class Hub:
         item["state"] = state
         item["pending"] = pending
         item["queued"] = len(self.control.queued(sid))
+        item["reply_via"] = self.reply_via(ref, alive)
         return item
 
     def announce_card(self, session_id: str) -> None:
@@ -353,7 +370,14 @@ class Hub:
             return
         card = self.card_for(ref)
         sig = json.dumps(
-            [card["phase"], card["state"], [p["call_id"] for p in card["pending"]], card["queued"], card["live"]],
+            [
+                card["phase"],
+                card["state"],
+                [p["call_id"] for p in card["pending"]],
+                card["queued"],
+                card["live"],
+                card["reply_via"],
+            ],
             sort_keys=True,
             default=str,
         )
@@ -476,6 +500,8 @@ class Hub:
         head["chain"] = self.control.chain_count(live.id)
         head["remote_approval"] = bool((self.cfg.get("remote_approval") or {}).get("enabled"))
         head["reply_queue"] = bool((self.cfg.get("reply_queue") or {}).get("enabled"))
+        head["reply_via"] = self.reply_via(live.ref, self.is_live(live.ref))
+        head["inbox_held"] = (live.state or {}).get("mode") in peer.HELD_MODES
         return head
 
     def snapshot(self, session_id: str) -> dict | None:
@@ -488,6 +514,112 @@ class Hub:
             "rounds": live.rounds_json,
             "pending": [c.as_dict() for c in self.control.pending_for(session_id)],
         }
+
+    # -- messages from the page -------------------------------------------
+
+    def peers(self, force: bool = False) -> dict[str, peer.Peer]:
+        """Sessions with an inbox, cached briefly: the board asks per card."""
+        now = time.time()
+        with self._lock:
+            if not force and now - self._peers_at < PEERS_TTL_S:
+                return self._peers
+        found = peer.registry()
+        with self._lock:
+            self._peers, self._peers_at = found, now
+        return found
+
+    def reply_via(self, ref: transcript.SessionRef | None, alive: bool) -> str:
+        """How a message typed on the page would reach this session.
+
+        ``inbox``   straight into the running process, now.
+        ``queue``   through the Stop hook when the turn ends (the old path,
+                    opt-in, for a process that has no inbox).
+        ``resume``  no process: ``claude -p --resume`` starts one.
+        ``busy``    a resume child is still working; wait for it.
+        ``""``      no way in.
+
+        ``ref`` may be None for a session the index does not know yet (a
+        transcript too small to list): the Stop hook can still carry a queued
+        reply there, so the queue is offered on its own terms.
+        """
+        messaging = self.cfg.get("messaging") or {}
+        queue_on = bool((self.cfg.get("reply_queue") or {}).get("enabled"))
+        if ref is None:
+            return "queue" if queue_on else ""
+        sid = ref.session_id
+        if sid in self.resuming:
+            return "busy"
+        if messaging.get("enabled", True) and sid in self.peers():
+            return "inbox"
+        if alive and queue_on:
+            return "queue"
+        if (
+            not alive
+            and messaging.get("enabled", True)
+            and messaging.get("resume", True)
+            and not ref.archived
+            and ref.cwd
+            and os.path.isdir(ref.cwd)
+        ):
+            return "resume"
+        return ""
+
+    def send_to_inbox(self, session_id: str, text: str) -> dict:
+        target = self.peers(force=True).get(session_id)
+        if target is None:
+            return {"ok": False, "error": "this session has no inbox any more"}
+        result = peer.send(target, text)
+        if not result.get("ok"):
+            return {"ok": False, "error": result.get("error") or "the inbox refused the message"}
+        live = self.get(session_id, create=False)
+        held = bool(live and (live.state or {}).get("mode") in peer.HELD_MODES)
+        self.broadcast(session_id, "delivery", {"status": "delivered", "via": "inbox", "held": held})
+        self.announce_card(session_id)
+        return {"ok": True, "via": "inbox", "held": held}
+
+    def start_resume(self, ref: transcript.SessionRef, text: str) -> dict:
+        """Continue a finished session on a worker thread.
+
+        The request returns as soon as the child is started. Progress reaches
+        the page as ``delivery`` events and, as always, through the transcript
+        itself: the watcher sees the new rows as the child writes them.
+        """
+        sid = ref.session_id
+        with self._lock:
+            if sid in self.resuming:
+                return {"ok": False, "error": "Claude is still working on the last message"}
+            self.resuming[sid] = time.time()
+        self.broadcast(sid, "delivery", {"status": "starting", "via": "resume"})
+        self._announce_head(sid)
+
+        def work():
+            try:
+                result = peer.resume(sid, ref.cwd, text)
+            except Exception as exc:  # never leave a session marked busy
+                result = {"ok": False, "error": str(exc)[:300]}
+            with self._lock:
+                self.resuming.pop(sid, None)
+                # The child exited; without hooks nothing else says so, and
+                # the fresh mtime would otherwise count as a live process.
+                self.ended.add(sid)
+            live = self.get(sid, create=False)
+            if live is not None:
+                self.poll_session(live)
+            self.broadcast(
+                sid,
+                "delivery",
+                {"status": "done" if result.get("ok") else "failed", "via": "resume", "error": result.get("error", "")},
+            )
+            self._announce_head(sid)
+
+        threading.Thread(target=work, daemon=True, name=f"scribe-resume-{sid[:8]}").start()
+        return {"ok": True, "via": "resume"}
+
+    def _announce_head(self, session_id: str) -> None:
+        self.announce_card(session_id)
+        live = self.get(session_id, create=False)
+        if live is not None:
+            self.broadcast(session_id, "head", self.head_for(live))
 
     # -- subscriptions --------------------------------------------------
 
@@ -781,15 +913,31 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/message":
             session_id = str(data.get("session_id") or "")
-            text = str(data.get("text") or "")
-            if not (self.hub.cfg.get("reply_queue") or {}).get("enabled"):
-                return self._json({"error": "reply queue is disabled"}, 409)
-            depth = self.hub.control.enqueue(session_id, text)
-            live = self.hub.get(session_id, create=False)
-            if live is not None:
-                self.hub.broadcast(session_id, "queue", {"queued": self.hub.control.queued(session_id)})
-            self.hub.announce_card(session_id)
-            return self._json({"ok": bool(depth), "queued": depth})
+            text = str(data.get("text") or "").strip()
+            if not text:
+                return self._json({"error": "empty message"}, 400)
+            ref = self.hub.ref_for(session_id)
+            via = self.hub.reply_via(ref, self.hub.is_live(ref) if ref else False)
+            if ref is None and not via:
+                return self._json({"error": "no such session"}, 404)
+            if via == "inbox":
+                result = self.hub.send_to_inbox(session_id, text)
+                return self._json(result, 200 if result.get("ok") else 502)
+            if via == "queue":
+                depth = self.hub.control.enqueue(session_id, text)
+                live = self.hub.get(session_id, create=False)
+                if live is not None:
+                    self.hub.broadcast(session_id, "queue", {"queued": self.hub.control.queued(session_id)})
+                self.hub.announce_card(session_id)
+                return self._json({"ok": bool(depth), "via": "queue", "queued": depth})
+            if via == "resume":
+                result = self.hub.start_resume(ref, text)
+                return self._json(result, 200 if result.get("ok") else 409)
+            if via == "busy":
+                return self._json({"error": "Claude is still working on the last message"}, 409)
+            if not (self.hub.cfg.get("messaging") or {}).get("enabled", True):
+                return self._json({"error": "messaging is disabled (scribe config set messaging.enabled true)"}, 409)
+            return self._json({"error": "no way to reach this session: it is running without an inbox"}, 409)
 
         if route == "/api/unqueue":
             session_id = str(data.get("session_id") or "")
@@ -1348,8 +1496,17 @@ def print_status() -> int:
         "approvals   "
         + ("enabled" if (cfg.get("remote_approval") or {}).get("enabled") else "disabled")
     )
+    messaging = cfg.get("messaging") or {}
+    if messaging.get("enabled", True):
+        reachable = len(peer.registry())
+        print(
+            f"messages    on  ({reachable} session{'s' if reachable != 1 else ''} with an inbox, "
+            f"resume {'on' if messaging.get('resume', True) else 'off'})"
+        )
+    else:
+        print("messages    off")
     print(
-        "replies     " + ("enabled" if (cfg.get("reply_queue") or {}).get("enabled") else "disabled")
+        "stop-queue  " + ("enabled" if (cfg.get("reply_queue") or {}).get("enabled") else "disabled")
     )
     refs = transcript.index_sessions()
     print(f"sessions    {len(refs)} transcripts visible")

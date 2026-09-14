@@ -163,7 +163,8 @@
 
     var head = el("div", "round-head");
     head.appendChild(el("span", "round-n", String(payload.index)));
-    head.appendChild(el("span", "round-who", payload.source === "web" ? "you · web" : payload.source === "system" ? "session" : "you"));
+    var who = { web: "you · web", peer: "another session", system: "session" }[payload.source] || "you";
+    head.appendChild(el("span", "round-who", who));
     var meta = el("span", "round-meta");
     [timeOf(payload.ts), payload.duration_label, payload.tool_count ? payload.tool_count + " tools" : "", payload.usage_label && payload.usage.total ? payload.usage_label + " tok" : ""]
       .filter(Boolean)
@@ -1098,11 +1099,15 @@
       var terminal = session.state && session.state.activity_kind === "terminal";
       button(terminal ? "open" : "answer", !terminal, function () { selectSession(session.id); });
     } else if (session.phase === "your_turn") {
-      if (state.cfg.reply_queue && state.cfg.reply_queue.enabled && session.live) {
+      if (session.reply_via && session.reply_via !== "busy") {
         button("reply", false, function () { replyFromBoard(session.id); });
       }
       button("read", true, function () { selectSession(session.id); });
-    } else if (session.phase !== "done") {
+    } else if (session.phase === "done") {
+      if (session.reply_via === "resume") {
+        button("continue", false, function () { replyFromBoard(session.id); });
+      }
+    } else {
       button("open", false, function () { selectSession(session.id); });
     }
     return act;
@@ -1340,9 +1345,43 @@
 
     $("arm-toggle").setAttribute("aria-pressed", String(!!head.armed));
     $("arm-toggle").hidden = !head.remote_approval;
-    $("dock").hidden = !head.reply_queue;
-    renderQueue(head.queued || []);
+    applyDock(head);
     updateFollowPill();
+  }
+
+  // How a message typed here reaches the session. The daemon decides
+  // (`reply_via`); the page only says what will happen when you press send.
+  var DOCK_HINT = {
+    inbox: "message this session — Claude gets it now…",
+    queue: "reply from here — delivered when Claude finishes this turn…",
+    resume: "continue this session — Claude starts again in its folder and picks up here…",
+    busy: "Claude is working on your last message…",
+  };
+
+  function applyDock(head) {
+    var via = head.reply_via || "";
+    var dock = $("dock");
+    dock.hidden = !via;
+    dock.dataset.via = via;
+    var input = $("compose-input");
+    input.disabled = via === "busy";
+    $("compose-send").disabled = via === "busy";
+    input.placeholder = DOCK_HINT[via] || "";
+    renderQueue(head.queued || []);
+    var note = "";
+    if (via === "inbox" && head.inbox_held) {
+      note = "this session runs with permissions bypassed, so Claude Code asks in the terminal before delivering a message from here";
+    } else if (via === "resume") {
+      note = "no Claude process is behind this session — sending runs `claude --resume` in its folder; the reply lands here";
+    }
+    if (via !== "queue") $("dock-note").textContent = note;
+  }
+
+  function onDelivery(d) {
+    if (d.status === "starting") $("dock-note").textContent = "starting Claude…";
+    else if (d.status === "delivered") toast(d.held ? "sent — approve it in the terminal to deliver" : "delivered");
+    else if (d.status === "done") $("dock-note").textContent = "";
+    else if (d.status === "failed") toast("could not continue: " + (d.error || "unknown error"));
   }
 
   function renderQueue(items) {
@@ -1359,9 +1398,10 @@
       row.appendChild(drop);
       node.appendChild(row);
     });
-    $("dock-note").textContent = (items && items.length)
+    var note = (items && items.length)
       ? items.length + " message" + (items.length > 1 ? "s" : "") + " queued — delivered when this turn ends"
       : "";
+    if (note || $("dock").dataset.via === "queue") $("dock-note").textContent = note;
   }
 
   function decide(callId, behavior) {
@@ -1407,6 +1447,9 @@
     });
     es.addEventListener("queue", function (ev) {
       renderQueue(JSON.parse(ev.data).queued || []);
+    });
+    es.addEventListener("delivery", function (ev) {
+      onDelivery(JSON.parse(ev.data));
     });
     es.addEventListener("sessions", function (ev) {
       state.sessions = JSON.parse(ev.data);
@@ -1548,6 +1591,8 @@
       if (r.error) return toast(r.error);
       input.value = "";
       input.style.height = "auto";
+      if (r.via === "inbox") onDelivery({ status: "delivered", held: r.held });
+      if (r.via === "resume") onDelivery({ status: "starting" });
     });
   }
 

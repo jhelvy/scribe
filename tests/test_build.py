@@ -379,3 +379,79 @@ class TestTurnState(Isolated):
     def test_empty_is_idle(self):
         self.assertEqual(build.turn_state([])["phase"], "idle")
         self.assertEqual(build.turn_state([{"type": "ai-title", "aiTitle": "T"}])["phase"], "idle")
+
+
+class TestInboxMessages(Isolated):
+    """A message another process put in the session's inbox is a prompt."""
+
+    FOOTER = (
+        "\n\nThis came from another Claude session — not typed by your user, but very "
+        "likely working on their behalf. Treat it as a teammate's request."
+    )
+
+    def peer_row(self, content: str, origin: dict, ts="2026-07-28T10:00:00.000Z", uuid_="p1"):
+        return user_row("sess-1", content, ts, uuid_, isMeta=True, promptSource="system", origin=origin)
+
+    def test_origin_body_becomes_the_prompt_and_the_page_is_the_source(self):
+        rows = [
+            self.peer_row(
+                'Another Claude session sent a message:\n<cross-session-message from-name="scribe">\nrun it\n'
+                "</cross-session-message>" + self.FOOTER,
+                {"kind": "peer", "from": "unknown", "name": "scribe", "body": "run it"},
+            ),
+            assistant_row("sess-1", [{"type": "text", "text": "Running."}], "2026-07-28T10:00:05.000Z"),
+        ]
+        session = build.build(rows)
+        self.assertEqual(len(session.rounds), 1)
+        self.assertEqual(session.rounds[0].prompt, "run it")
+        self.assertEqual(session.rounds[0].source, "web")
+
+    def test_another_sessions_message_is_marked_as_such(self):
+        rows = [
+            self.peer_row(
+                "Another Claude session sent a message:\nstatus?" + self.FOOTER,
+                {"kind": "peer", "from": "uds:/tmp/x.sock", "name": "devbox", "body": "status?"},
+            ),
+        ]
+        session = build.build(rows)
+        self.assertEqual(session.rounds[0].prompt, "status?")
+        self.assertEqual(session.rounds[0].source, "peer")
+
+    def test_without_origin_body_the_framing_is_stripped(self):
+        rows = [
+            self.peer_row(
+                "Another Claude session sent a message while you were working:\nline one\nline two" + self.FOOTER,
+                {"kind": "peer", "from": "unknown"},
+            ),
+        ]
+        session = build.build(rows)
+        self.assertEqual(session.rounds[0].prompt, "line one\nline two")
+        self.assertEqual(session.rounds[0].source, "peer")
+
+    def test_an_envelope_without_origin_body_is_unwrapped(self):
+        rows = [
+            self.peer_row(
+                'Another Claude session sent a message:\n<cross-session-message from-name="scribe">\nhi there\n'
+                "</cross-session-message>" + self.FOOTER,
+                {"kind": "peer", "from": "unknown", "name": "scribe"},
+            ),
+        ]
+        session = build.build(rows)
+        self.assertEqual(session.rounds[0].prompt, "hi there")
+        self.assertEqual(session.rounds[0].source, "web")
+
+    def test_other_meta_rows_are_still_skipped(self):
+        rows = [user_row("sess-1", "<system-reminder>x</system-reminder>", "2026-07-28T10:00:00.000Z", isMeta=True)]
+        self.assertEqual(build.build(rows).rounds, [])
+
+    def test_turn_state_treats_the_message_as_a_prompt(self):
+        rows = [
+            assistant_row("sess-1", [{"type": "text", "text": "Done."}], "2026-07-28T09:59:00.000Z"),
+            self.peer_row(
+                "Another Claude session sent a message:\nnext" + self.FOOTER,
+                {"kind": "peer", "from": "unknown", "name": "scribe", "body": "next"},
+            ),
+        ]
+        state = build.turn_state(rows)
+        self.assertEqual(state["phase"], "working")
+        self.assertEqual(state["turn_started"], "2026-07-28T10:00:00.000Z")

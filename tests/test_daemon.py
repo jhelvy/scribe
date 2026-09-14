@@ -482,3 +482,144 @@ class TestBoard(DaemonHarness):
         self.assertTrue(cards)
         self.assertEqual(cards[-1]["id"], "sess-1")
         self.assertEqual(cards[-1]["phase"], "done")
+
+
+class TestInboxDelivery(DaemonHarness):
+    """A message from the page goes straight into a session that has an inbox."""
+
+    def setUp(self):
+        super().setUp()
+        from test_peer import FakeInbox
+
+        self.path = self.transcript_path(session_id="sess-1")
+        self.write_rows(self.path, simple_session("sess-1"))
+        self.inbox = FakeInbox("sess-1")
+        self.addCleanup(self.inbox.close)
+        self.inbox.register()
+        self.hub.refresh_index(force=True)
+
+    def card(self, session_id="sess-1"):
+        for item in self.get("/api/sessions")["sessions"]:
+            if item["id"] == session_id:
+                return item
+        self.fail("no card for " + session_id)
+
+    def test_the_card_and_head_say_inbox(self):
+        self.assertEqual(self.card()["reply_via"], "inbox")
+        self.assertEqual(self.get("/api/session?id=sess-1")["head"]["reply_via"], "inbox")
+
+    def test_a_session_with_an_inbox_is_live_even_when_its_file_is_old(self):
+        old = time.time() - 3600
+        os.utime(self.path, (old, old))
+        self.hub.refresh_index(force=True)
+        self.hub.peers(force=True)
+        self.assertTrue(self.card()["live"])
+
+    def test_message_is_delivered_now_not_queued(self):
+        reply = self.post("/api/message", {"session_id": "sess-1", "text": "and the docs"})
+        self.assertEqual(reply, {"ok": True, "via": "inbox", "held": False})
+        self.assertTrue(self.inbox.got.wait(2))
+        self.assertEqual([l["type"] for l in self.inbox.lines], ["auth", "user"])
+        self.assertIn("and the docs", self.inbox.lines[1]["message"]["content"])
+        self.assertEqual(self.hub.control.queued("sess-1"), [])
+
+    def test_the_inbox_wins_over_the_stop_hook_queue(self):
+        self.hub.cfg["reply_queue"]["enabled"] = True
+        reply = self.post("/api/message", {"session_id": "sess-1", "text": "now"})
+        self.assertEqual(reply["via"], "inbox")
+        self.assertEqual(self.hub.control.queued("sess-1"), [])
+
+    def test_disabling_messaging_falls_back_to_the_queue_or_refuses(self):
+        self.hub.cfg["messaging"]["enabled"] = False
+        reply = self.post("/api/message", {"session_id": "sess-1", "text": "now"})
+        self.assertIn("error", reply)
+        self.hub.cfg["reply_queue"]["enabled"] = True
+        reply = self.post("/api/message", {"session_id": "sess-1", "text": "now"})
+        self.assertEqual(reply["via"], "queue")
+
+    def test_empty_and_unknown_are_refused(self):
+        self.assertIn("error", self.post("/api/message", {"session_id": "sess-1", "text": "  "}))
+        self.assertIn("error", self.post("/api/message", {"session_id": "nope", "text": "hi"}))
+
+
+class TestResumeDelivery(DaemonHarness):
+    """No process behind a session: the daemon starts one with `claude -p --resume`."""
+
+    def setUp(self):
+        super().setUp()
+        self.path = self.transcript_path(session_id="sess-1", cwd=str(self.tmp))
+        self.write_rows(self.path, simple_session("sess-1", cwd=str(self.tmp)))
+        old = time.time() - 3600
+        os.utime(self.path, (old, old))
+        self.hub.refresh_index(force=True)
+        self.calls = []
+        self.finished = threading.Event()
+        self._real_resume = daemon.peer.resume
+
+        def fake_resume(session_id, cwd, text, timeout=0):
+            self.calls.append((session_id, cwd, text))
+            from helpers import assistant_row, user_row
+
+            self.append_rows(
+                self.path,
+                [
+                    user_row(session_id, text, "2026-07-28T11:00:00.000Z", "u9", cwd=cwd),
+                    assistant_row(session_id, [{"type": "text", "text": "Continued."}], "2026-07-28T11:00:05.000Z", "a9", cwd=cwd),
+                ],
+            )
+            self.finished.set()
+            return {"ok": True}
+
+        daemon.peer.resume = fake_resume
+
+    def tearDown(self):
+        daemon.peer.resume = self._real_resume
+        super().tearDown()
+
+    def card(self, session_id="sess-1"):
+        for item in self.get("/api/sessions")["sessions"]:
+            if item["id"] == session_id:
+                return item
+        self.fail("no card for " + session_id)
+
+    def test_a_finished_session_offers_resume(self):
+        card = self.card()
+        self.assertEqual(card["phase"], "done")
+        self.assertEqual(card["reply_via"], "resume")
+
+    def test_resume_can_be_turned_off(self):
+        self.hub.cfg["messaging"]["resume"] = False
+        self.assertEqual(self.card()["reply_via"], "")
+
+    def test_message_starts_a_resume_child_in_the_sessions_directory(self):
+        reply = self.post("/api/message", {"session_id": "sess-1", "text": "keep going"})
+        self.assertEqual(reply, {"ok": True, "via": "resume"})
+        self.assertTrue(self.finished.wait(5))
+        self.assertEqual(self.calls, [("sess-1", str(self.tmp), "keep going")])
+        for _ in range(50):
+            if "sess-1" not in self.hub.resuming:
+                break
+            time.sleep(0.05)
+        self.assertNotIn("sess-1", self.hub.resuming)
+        snap = self.get("/api/session?id=sess-1")
+        self.assertEqual(snap["rounds"][-1]["prompt"], "keep going")
+        # The child has exited: the card is done again, and offers resume again.
+        card = self.card()
+        self.assertEqual(card["phase"], "done")
+        self.assertEqual(card["reply_via"], "resume")
+
+    def test_a_second_message_while_the_child_runs_is_refused(self):
+        gate = threading.Event()
+
+        def slow_resume(session_id, cwd, text, timeout=0):
+            gate.wait(5)
+            return {"ok": True}
+
+        daemon.peer.resume = slow_resume
+        first = self.post("/api/message", {"session_id": "sess-1", "text": "one"})
+        self.assertEqual(first["via"], "resume")
+        self.assertEqual(self.card()["reply_via"], "busy")
+        self.assertEqual(self.card()["phase"], "working")
+        second = self.post("/api/message", {"session_id": "sess-1", "text": "two"})
+        self.assertIn("error", second)
+        gate.set()

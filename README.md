@@ -223,7 +223,45 @@ because they were archived.
 
 ---
 
-## Two-way control
+## Continuing a conversation from the page
+
+The compose box at the bottom of a session sends a message into that session.
+It is on by default because every message is something you typed and pressed
+send on; nothing is injected on your behalf. How it gets there depends on what
+is behind the session, and the placeholder text says which:
+
+**A running session.** Claude Code 2.1 gives every session an inbox: a Unix
+socket registered in `~/.claude/sessions/`, the same channel one Claude
+session uses to message another. scribe writes your message there and it lands
+exactly as a prompt typed in the terminal would: it starts a turn if Claude is
+waiting for you, and waits its turn if Claude is busy. No hooks needed. The
+message is recorded in the transcript as an ordinary row, so the log shows it
+as *you · web* with Claude's reply underneath.
+
+One thing Claude Code enforces: a session running with permissions bypassed
+(`--dangerously-skip-permissions`, or auto mode) holds a message from any other
+process and asks in the terminal before delivering it. scribe does not claim
+otherwise on your behalf. To let page messages through without the prompt, set
+`"crossSessionInbound": "accept"` in your Claude Code settings.
+
+**A finished session.** With no process behind it, sending runs
+`claude -p --resume <id>` in the session's own directory with your message on
+stdin. Claude Code appends the prompt and everything that follows to the same
+transcript under the same id, so the page updates as the turn runs, and
+`claude --resume` in a terminal later picks up from there. Print mode never
+shows a permission dialog: a tool the session's settings do not already allow
+is refused and Claude says so. The board's *done* strip offers *continue* for
+these; `messaging.resume` turns it off.
+
+**A running session without an inbox** (an older Claude Code, or messaging
+turned off there) falls back to the Stop-hook queue below when that is enabled.
+
+```bash
+scribe config set messaging.enabled false   # hide the compose box entirely
+scribe config set messaging.resume false    # never start a process
+```
+
+## Two-way control through hooks
 
 Off by default. Turn on deliberately.
 
@@ -245,14 +283,17 @@ Note this goes through Claude Code's own hook system, not the Agent SDK — so i
 is not subject to the subscription-account restriction that affects SDK-based
 tools.
 
-**Replies.** A compose box queues text, delivered through the `Stop` hook when
-the turn ends. Guards: `stop_hook_active` is honoured so a blocked stop never
+**The Stop-hook queue.** The older reply path, kept for sessions the inbox
+cannot reach. Text is queued and delivered through the `Stop` hook when the
+turn ends. Guards: `stop_hook_active` is honoured so a blocked stop never
 triggers another, and `reply_queue.max_chain` (default 5) caps consecutive
-injections. A prompt typed in the terminal resets the count.
+injections. A prompt typed in the terminal resets the count. A message
+delivered this way reaches Claude as the reason for a blocked stop rather than
+as a user row, so the daemon splices it into the view itself.
 
-This is the one feature that puts text *into* a conversation. A queued reply
-enters the context window exactly as a typed one would — which is the point of
-it, but it is why the blanket claim at the top of this file is about recording.
+These are the features that put text *into* a conversation. A message enters
+the context window exactly as a typed one would — which is the point of it, but
+it is why the blanket claim at the top of this file is about recording.
 
 ---
 
@@ -267,8 +308,10 @@ it, but it is why the blanket claim at the top of this file is about recording.
 | `markdown.max_output_chars` | `4000` | per tool call, markdown only |
 | `explain.enabled` | `true` | plain-English margin notes |
 | `explain.model` | `claude-haiku-4-5` | |
+| `messaging.enabled` | `true` | the compose box: message a session from the page |
+| `messaging.resume` | `true` | `claude -p --resume` a session with no process behind it |
 | `remote_approval.enabled` | `false` | approve from the browser |
-| `reply_queue.enabled` | `false` | type replies from the browser |
+| `reply_queue.enabled` | `false` | Stop-hook replies, for sessions without an inbox |
 | `redact.enabled` | `true` | scrub secrets |
 
 ---

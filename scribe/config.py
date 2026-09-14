@@ -54,6 +54,16 @@ DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "max_chain": 5,  # consecutive Stop-hook injections before we stand down
     },
+    # Messages typed on the page. Delivered through Claude Code's own session
+    # inbox, so they land exactly as a prompt typed in the terminal would. On
+    # by default: every message is an explicit act, and Claude Code applies its
+    # own inbound policy (a bypass-mode session asks before accepting one).
+    "messaging": {
+        "enabled": True,
+        # A session with no process behind it is started again with
+        # `claude --bg --resume` so the message has somewhere to go.
+        "resume": True,
+    },
     # Secret scrubbing applied to markdown and the viewer payload alike
     "redact": {
         "enabled": True,
@@ -79,6 +89,8 @@ ENV_OVERRIDES = {
     "remote_approval.enabled": ("SCRIBE_REMOTE_APPROVAL", _bool),
     "remote_approval.wait_s": ("SCRIBE_APPROVAL_WAIT", int),
     "reply_queue.enabled": ("SCRIBE_REPLY_QUEUE", _bool),
+    "messaging.enabled": ("SCRIBE_MESSAGING", _bool),
+    "messaging.resume": ("SCRIBE_MESSAGING_RESUME", _bool),
 }
 
 

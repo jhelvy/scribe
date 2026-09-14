@@ -48,6 +48,20 @@ RE_ANY_TAG_BLOCK = re.compile(
     re.S,
 )
 
+# A message another process put in the session's inbox. Claude Code frames it
+# with a header line and a trailing paragraph of guidance for the model, and
+# marks the row ``isMeta``. Newer rows also carry ``origin.body``, the text as
+# sent; the regexes are the fallback for rows that do not.
+RE_PEER_HEADER = re.compile(
+    r"\A(?:Another Claude session|A peer session) sent a message(?: while you were working)?:\n"
+)
+RE_PEER_FOOTER = re.compile(
+    r"\n\n(?:This came from another Claude session|That \"other Claude session\")[^\n]*\Z"
+)
+RE_PEER_ENVELOPE = re.compile(r"\A<cross-session-message(?: [^>]*)?>\n(.*)\n</cross-session-message>\Z", re.S)
+#: ``origin.name`` on a message the scribe page sent (see ``peer.SENDER_NAME``).
+PAGE_SENDER = "scribe"
+
 
 # ---------------------------------------------------------------- text helpers
 
@@ -82,11 +96,40 @@ def user_prompt_text(row: dict) -> str:
     Used by the indexer for fallback titles as well as by the builder, hence the
     module-level home.
     """
+    peer = peer_message(row)
+    if peer is not None:
+        return peer[0]
     parts = []
     for block in _blocks(row):
         if isinstance(block, dict) and block.get("type") == "text":
             parts.append(block.get("text") or "")
     return strip_wrappers("\n".join(parts))[0].strip()
+
+
+def peer_message(row: dict) -> tuple[str, str] | None:
+    """``(text, source)`` for a user row delivered through the session inbox.
+
+    ``source`` is ``web`` when the scribe page sent it and ``peer`` for any
+    other sender. ``None`` for every other kind of user row.
+    """
+    origin = row.get("origin")
+    if not isinstance(origin, dict) or origin.get("kind") != "peer":
+        return None
+    source = "web" if origin.get("name") == PAGE_SENDER else "peer"
+    body = origin.get("body")
+    if isinstance(body, str):
+        return body.strip(), source
+    parts = []
+    for block in _blocks(row):
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(block.get("text") or "")
+    text = "\n".join(parts)
+    text = RE_PEER_HEADER.sub("", text)
+    text = RE_PEER_FOOTER.sub("", text)
+    match = RE_PEER_ENVELOPE.match(text.strip())
+    if match:
+        text = match.group(1)
+    return text.strip(), source
 
 
 def strip_wrappers(text: str) -> tuple[str, list[str], list[str]]:
@@ -294,7 +337,7 @@ def turn_state(rows, cwd: str = "") -> dict:
         blocks = [b for b in _blocks(row) if isinstance(b, dict)]
 
         if kind == "user":
-            if row.get("isMeta"):
+            if row.get("isMeta") and peer_message(row) is None:
                 continue
             if any(b.get("type") == "tool_result" for b in blocks):
                 if not decided:
@@ -530,6 +573,15 @@ def _handle_user(builder: _RoundBuilder, row: dict, ts: str, cwd: str) -> None:
             if call is None:
                 continue
             _apply_result(call, block, sidecar, ts)
+        return
+
+    # A message from the inbox is marked meta, but it is a prompt: someone
+    # wrote it and Claude answers it. Skipping it would show a reply to nothing.
+    peer = peer_message(row)
+    if peer is not None:
+        text, source = peer
+        if text:
+            builder.open_round(ts, row.get("uuid") or "", text, source=source)
         return
 
     if row.get("isMeta"):

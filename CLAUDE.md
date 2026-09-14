@@ -68,6 +68,7 @@ scribe/
   store.py              where a log lives and what goes in it
   daemon.py             HTTP + SSE + watcher + control socket
   control.py            approval holds and the reply queue (no transport)
+  peer.py               messages into a session: the inbox socket, -p --resume
   search.py             FTS5 index over every session, incremental
   explain.py            Haiku explainer, content-addressed cache
   install.py            writing hooks into settings.json
@@ -146,6 +147,42 @@ to escape.
 **`.chip.note` and the rail's note element must not share a class.** They did
 once, and the chips inherited `position: absolute`. The rail element is
 `.rail-note`.
+
+## Messages from the page
+
+`peer.py` puts a message typed in the viewer in front of a session. Claude
+Code 2.1 registers every session in `~/.claude/sessions/<pid>.json` with a
+`messagingSocketPath`, and publishes the token a peer must present in
+`<pid>.<hash>.key` beside it. The wire is two JSON lines on that socket: an
+`auth` frame, then a `user` frame whose content is wrapped in Claude Code's own
+`<cross-session-message from-name="scribe">` envelope. The envelope is what
+makes the transcript row carry `origin.name` and a clean `origin.body`;
+`build.peer_message` keys on those, so a page message renders as `source: web`
+and one from another Claude session as `peer`, with no prose parsing unless
+`origin.body` is missing. Those rows are `isMeta: true`; the builder and
+`turn_state` must treat a peer row as a prompt or the log shows a reply to
+nothing.
+
+`Hub.reply_via` decides the channel per session and the viewer only shows it:
+`inbox` when the registry has the session, `queue` (Stop hook, opt-in) for a
+live process without one, `resume` when there is no process, `busy` while a
+resume child runs. `is_live` trusts the registry before any hook, so a session
+with an inbox is never "done".
+
+**Do not assert `from-mode`.** Claude Code holds a message that asserts no
+permission mode when the recipient runs with permissions bypassed, and asks in
+the terminal. That check is what stops a less trusted process steering a more
+trusted session. scribe is such a process as far as Claude Code can tell; the
+user's remedy is `crossSessionInbound: accept` in their own settings.
+
+**`claude --bg --resume` forks.** It starts a copy under a new id. Only
+`claude -p --resume <id>` appends to the same transcript, so that is what a
+finished session gets, with the message on stdin (a prompt starting with `-`
+must not become a flag). `peer.child_env` strips every `CLAUDE*` variable except
+`CLAUDE_CONFIG_DIR`: the daemon is usually a grandchild of a session and would
+otherwise hand the child its parent's id, inbox and token. When the child exits
+the session is added to `ended`, or its fresh mtime would count as a process
+for ten minutes and the composer would hide.
 
 ## The rail
 
