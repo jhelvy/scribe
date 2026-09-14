@@ -287,3 +287,95 @@ class TestRobustness(Isolated):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTurnState(Isolated):
+    """Where a session stands, read off the tail — what puts it in a board column."""
+
+    def prompt(self, ts="2026-07-28T10:00:00.000Z"):
+        return user_row("s", "Please check the build.", ts, "u1")
+
+    def reply(self, blocks, ts="2026-07-28T10:00:20.000Z", stop="end_turn"):
+        row = assistant_row("s", blocks, ts, "a1")
+        row["message"]["stop_reason"] = stop
+        return row
+
+    def test_end_turn_is_your_turn_with_the_reply(self):
+        rows = [self.prompt(), self.reply([{"type": "text", "text": "**Done.** All green.\nMore."}])]
+        st = build.turn_state(rows)
+        self.assertEqual(st["phase"], "your_turn")
+        self.assertEqual(st["reply"], "Done. All green.")
+        self.assertEqual(st["turn_started"], "2026-07-28T10:00:00.000Z")
+
+    def test_trailing_tool_call_is_working(self):
+        rows = [self.prompt(), self.reply([tool_use("t1", "Bash", {"command": "pytest -q"})], stop="tool_use")]
+        st = build.turn_state(rows)
+        self.assertEqual(st["phase"], "working")
+        self.assertEqual(st["tool"], "Bash")
+        self.assertEqual(st["activity"], "pytest -q")
+        self.assertEqual(st["activity_kind"], "bash")
+
+    def test_tool_result_means_claude_is_about_to_continue(self):
+        rows = [
+            self.prompt(),
+            self.reply([tool_use("t1", "Bash", {"command": "ls"})], stop="tool_use"),
+            tool_result_row("s", "t1", "a b", "2026-07-28T10:00:25.000Z"),
+        ]
+        st = build.turn_state(rows)
+        self.assertEqual(st["phase"], "working")
+        self.assertEqual(st["turn_started"], "2026-07-28T10:00:00.000Z")
+
+    def test_a_question_needs_you(self):
+        rows = [self.prompt(), self.reply(
+            [tool_use("t1", "AskUserQuestion", {"questions": [{"question": "Which tone?"}]})], stop="tool_use")]
+        st = build.turn_state(rows)
+        self.assertEqual(st["phase"], "needs_you")
+        self.assertEqual(st["activity_kind"], "ask")
+        self.assertEqual(st["activity"], "Which tone?")
+
+    def test_a_plan_waiting_for_approval_needs_you(self):
+        rows = [self.prompt(), self.reply([tool_use("t1", "ExitPlanMode", {})], stop="tool_use")]
+        st = build.turn_state(rows)
+        self.assertEqual(st["phase"], "needs_you")
+        self.assertEqual(st["activity_kind"], "plan")
+
+    def test_permission_mode_is_reported(self):
+        rows = [self.prompt(), {"type": "permission-mode", "permissionMode": "plan", "sessionId": "s"},
+                self.reply([tool_use("t1", "Read", {"file_path": "/tmp/proj/a.py"})], stop="tool_use")]
+        st = build.turn_state(rows, cwd="/tmp/proj")
+        self.assertEqual(st["mode"], "plan")
+        self.assertEqual(st["phase"], "working")
+        self.assertEqual(st["activity"], "a.py")
+
+    def test_interruption_hands_the_turn_back(self):
+        rows = [
+            self.prompt(),
+            self.reply([tool_use("t1", "Bash", {"command": "sleep 100"})], stop="tool_use"),
+            tool_result_row("s", "t1", "[Request interrupted by user for tool use]", "2026-07-28T10:00:25.000Z"),
+            user_row("s", "[Request interrupted by user]", "2026-07-28T10:00:26.000Z", "u2"),
+        ]
+        st = build.turn_state(rows)
+        self.assertEqual(st["phase"], "your_turn")
+        self.assertEqual(st["activity_kind"], "stop")
+        self.assertEqual(st["turn_started"], "2026-07-28T10:00:00.000Z")
+
+    def test_missing_stop_reason_treats_final_text_as_the_end(self):
+        rows = [self.prompt(), self.reply([{"type": "text", "text": "Done."}], stop=None)]
+        self.assertEqual(build.turn_state(rows)["phase"], "your_turn")
+        rows = [self.prompt(), self.reply([{"type": "thinking", "thinking": "hm"}], stop=None)]
+        self.assertEqual(build.turn_state(rows)["phase"], "working")
+
+    def test_meta_rows_after_the_reply_do_not_matter(self):
+        rows = [self.prompt(), self.reply([{"type": "text", "text": "Done."}]),
+                {"type": "last-prompt", "lastPrompt": "x"}, {"type": "ai-title", "aiTitle": "T"},
+                {"type": "system", "subtype": "turn_duration", "durationMs": 5}]
+        self.assertEqual(build.turn_state(rows)["phase"], "your_turn")
+
+    def test_sidechain_rows_are_ignored(self):
+        rows = [self.prompt(), self.reply([{"type": "text", "text": "Done."}]),
+                assistant_row("s", [tool_use("t9", "Bash", {"command": "ls"})], "2026-07-28T10:00:30.000Z", "a9", isSidechain=True)]
+        self.assertEqual(build.turn_state(rows)["phase"], "your_turn")
+
+    def test_empty_is_idle(self):
+        self.assertEqual(build.turn_state([])["phase"], "idle")
+        self.assertEqual(build.turn_state([{"type": "ai-title", "aiTitle": "T"}])["phase"], "idle")

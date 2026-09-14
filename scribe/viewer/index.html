@@ -18,6 +18,7 @@
           <span class="dot" id="conn-dot" title="connection"></span>
           <b>scribe</b>
           <span class="spacer"></span>
+          <button class="btn" id="board-toggle" title="Board (b)" aria-pressed="false">board</button>
           <button class="btn" id="theme-toggle" title="Theme (t)" aria-label="Toggle theme">◐</button>
         </div>
         <div class="sidebar-search">
@@ -49,6 +50,8 @@
           <button class="btn" id="log-link" title="Copy the markdown log path">.md</button>
           <div id="progress"></div>
         </header>
+
+        <main class="board" id="board" hidden aria-label="Sessions by state"></main>
 
         <main class="stage" id="stage">
           <div class="column" id="column"></div>

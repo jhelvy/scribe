@@ -75,6 +75,14 @@ ten years when this program no longer exists.
 Updates stream over SSE and are applied in place, so an open tool call stays
 open and your scroll position holds while the log grows underneath you.
 
+**Shows every live session on a board.** Press `b` or click *board*: sessions
+sit in columns by what they are waiting on — *needs you* (an approval, a
+question, a plan), *planning*, *working*, *your turn* (Claude replied) — with
+the running command, the reply's first line, or the approval countdown on the
+card, and approve/deny right there. Everything without a process behind it is
+the collapsed *done* column. The column is read off the transcript, so it is
+right even when the daemon was started after the session.
+
 **Explains opaque tool calls in plain English.** A `python3 - <<'EOF'` heredoc
 becomes a sentence in the margin, next to the call — ideally while you are still
 deciding whether to approve it. Answers cache by content, so a command explained

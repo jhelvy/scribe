@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterator
 
@@ -204,6 +204,10 @@ class SessionRef:
     #: True when Claude Code has already deleted the original and this session
     #: exists only because scribe archived it.
     archived: bool = False
+    #: Where the transcript's tail says the session stands; see
+    #: :func:`scribe.build.turn_state`. Read off the same tail slice as the
+    #: title, so the board costs the index nothing extra.
+    state: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -220,6 +224,7 @@ class SessionRef:
             "git_branch": self.git_branch,
             "version": self.version,
             "archived": self.archived,
+            "state": dict(self.state),
         }
 
 
@@ -234,6 +239,17 @@ def iter_transcripts(projects_root: Path | None = None) -> Iterator[Path]:
             yield jsonl
 
 
+#: peek() results by path, keyed on (size, mtime). The daemon re-indexes every
+#: few seconds; without this every rescan re-reads a quarter megabyte from the
+#: end of every transcript on the machine to learn nothing has changed.
+_PEEK_CACHE: dict[str, tuple[int, int, SessionRef]] = {}
+
+#: How far back to look for a content row when the normal tail slice has none.
+#: A row carrying a pasted screenshot runs to a megabyte, and a session that
+#: ends on a few of them hides its last real message behind them.
+WIDE_TAIL_BYTES = 8 * 1024 * 1024
+
+
 def peek(path: Path, head_lines: int = 40, tail_bytes: int = 262_144) -> SessionRef:
     """Cheap metadata read: a few lines from the front, a slice from the back.
 
@@ -241,6 +257,10 @@ def peek(path: Path, head_lines: int = 40, tail_bytes: int = 262_144) -> Session
     over fifty projects viable on every daemon start. Titles are the interesting
     part — Claude Code writes ``{"type":"ai-title"}`` rows as the conversation
     develops, and the last one is the best summary of the session available.
+
+    Results are cached on (size, mtime), so a transcript that has not changed
+    costs one ``stat``. Every caller gets its own copy: the archive sweep sets
+    ``archived`` on the ref it is handed, and that must not leak into the cache.
     """
     path = Path(path)
     ref = SessionRef(session_id=path.stem, path=path, cwd="", project_dir=path.parent.name)
@@ -248,6 +268,42 @@ def peek(path: Path, head_lines: int = 40, tail_bytes: int = 262_144) -> Session
         st = path.stat()
     except OSError:
         return ref
+    key = str(path)
+    hit = _PEEK_CACHE.get(key)
+    if hit is not None and hit[0] == st.st_size and hit[1] == st.st_mtime_ns:
+        return replace(hit[2], state=dict(hit[2].state))
+    ref = _peek(ref, st, head_lines, tail_bytes)
+    _PEEK_CACHE[key] = (st.st_size, st.st_mtime_ns, ref)
+    return replace(ref, state=dict(ref.state))
+
+
+def _tail_rows(fh, size: int, tail_bytes: int) -> list[dict]:
+    """Rows from the last ``tail_bytes`` of an open file, first partial line dropped."""
+    tail: list[dict] = []
+    if size <= 0:
+        return tail
+    start = max(0, size - tail_bytes)
+    fh.seek(start)
+    blob = fh.read()
+    pieces = blob.split(b"\n")
+    if start > 0 and pieces:
+        pieces.pop(0)
+    for raw in pieces:
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            tail.append(row)
+    return tail
+
+
+def _peek(ref: SessionRef, st: os.stat_result, head_lines: int, tail_bytes: int) -> SessionRef:
+    from .build import turn_state  # local import: build imports us back
+
+    path = ref.path
     ref.size = st.st_size
     ref.mtime = st.st_mtime
 
@@ -265,24 +321,14 @@ def peek(path: Path, head_lines: int = 40, tail_bytes: int = 262_144) -> Session
                 if isinstance(row, dict):
                     head.append(row)
 
-            # Tail slice: seek back, drop the first (probably partial) line.
-            tail: list[dict] = []
-            if st.st_size > 0:
-                start = max(0, st.st_size - tail_bytes)
-                fh.seek(start)
-                blob = fh.read()
-                pieces = blob.split(b"\n")
-                if start > 0 and pieces:
-                    pieces.pop(0)
-                for raw in pieces:
-                    if not raw.strip():
-                        continue
-                    try:
-                        row = json.loads(raw.decode("utf-8", "replace"))
-                    except ValueError:
-                        continue
-                    if isinstance(row, dict):
-                        tail.append(row)
+            tail = _tail_rows(fh, st.st_size, tail_bytes)
+            state_rows = tail or head
+            # No content row in the slice, but there is more file behind it:
+            # look further back once, for the state only.
+            if turn_state(state_rows)["phase"] == "idle" and st.st_size > tail_bytes:
+                wide = _tail_rows(fh, st.st_size, min(st.st_size, WIDE_TAIL_BYTES))
+                if wide:
+                    state_rows = wide
     except OSError:
         return ref
 
@@ -308,6 +354,8 @@ def peek(path: Path, head_lines: int = 40, tail_bytes: int = 262_144) -> Session
     ref.title = pick_title(head + tail) or _first_prompt_title(head)
     if not ref.title:
         ref.title = ref.slug or "Untitled session"
+
+    ref.state = turn_state(state_rows, ref.cwd)
     return ref
 
 

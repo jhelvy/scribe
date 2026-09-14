@@ -1065,3 +1065,229 @@ kbd {
     scroll-behavior: auto !important;
   }
 }
+
+/* ------------------------------------------------------------------ board */
+
+/* Live sessions as cards in columns, one column per thing a session can be
+   waiting on. Chrome, so mono throughout; the one serif on the board is the
+   card title, because that is the conversation's name. Column colour is the
+   card's left border too, so a card reads its state on its own. */
+
+body[data-view="board"] .stage,
+body[data-view="board"] .dock,
+body[data-view="board"] .follow-pill,
+body[data-view="board"] .find,
+body[data-view="board"] #arm-toggle,
+body[data-view="board"] #collapse-toggle,
+body[data-view="board"] #log-link { display: none !important; }
+
+.board {
+  --col-w: 17.5rem;
+  flex: 1;
+  display: flex;
+  gap: 0.75rem;
+  align-items: stretch;
+  padding: 0.9rem 1rem 1.2rem;
+  overflow-x: auto;
+  min-height: calc(100dvh - 2.7rem);
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+}
+
+.board .col {
+  flex: 0 0 var(--col-w);
+  display: flex;
+  flex-direction: column;
+  background: var(--paper-2);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-lg);
+  min-height: 0;
+}
+
+.board .colhead {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.55rem 0.7rem 0.45rem;
+  font-size: 0.625rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+.board .colhead .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.board .colhead .count { color: var(--ink-3); letter-spacing: 0.04em; font-variant-numeric: tabular-nums; }
+.board .colhead .fold { margin-left: auto; color: var(--ink-3); font-size: 0.75rem; line-height: 1; padding: 0 0.2rem; }
+.board .colhead .fold:hover { color: var(--ink); }
+
+.board .col[data-phase="needs_you"] .dot { background: var(--amber); box-shadow: 0 0 0 3px color-mix(in oklch, var(--amber) 22%, transparent); }
+.board .col[data-phase="working"] .dot { background: var(--slate); }
+.board .col[data-phase="planning"] .dot { background: transparent; border: 1.5px solid var(--slate); }
+.board .col[data-phase="your_turn"] .dot { background: var(--ember); }
+.board .col[data-phase="done"] .dot { background: var(--ink-3); }
+
+.board .cards { display: flex; flex-direction: column; gap: 0.5rem; padding: 0 0.5rem 0.6rem; }
+.board .col-empty {
+  margin: auto;
+  padding: 3rem 1rem;
+  text-align: center;
+  font-size: 0.6875rem;
+  color: var(--ink-3);
+}
+.board .col-more {
+  padding: 0.5rem 0.7rem 0.7rem;
+  font-size: 0.625rem;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+.board .card {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+  padding: 0.5rem 0.65rem 0.55rem;
+  display: grid;
+  gap: 0.3rem;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: transform 120ms var(--ease), box-shadow 120ms var(--ease);
+}
+.board .card:hover { transform: translateY(-1px); box-shadow: var(--shadow-2); }
+.board .col[data-phase="needs_you"] .card { border-left-color: var(--amber); }
+.board .col[data-phase="working"] .card { border-left-color: var(--slate); }
+.board .col[data-phase="planning"] .card { border-left-color: var(--slate); border-left-style: dashed; }
+.board .col[data-phase="your_turn"] .card { border-left-color: var(--ember); }
+
+.board .card .head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 0.5625rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  min-width: 0;
+}
+.board .card .head .proj { color: var(--ink-2); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board .card .head .branch { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board .card .head .branch::before { content: "· "; }
+.board .card .head .id { margin-left: auto; flex: none; letter-spacing: 0.03em; text-transform: none; }
+
+.board .card .title {
+  font-family: var(--serif);
+  font-size: 0.95rem;
+  line-height: 1.32;
+  color: var(--ink);
+  text-wrap: balance;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.board .card .status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.625rem;
+  color: var(--ink-2);
+  min-width: 0;
+}
+.board .status .k {
+  flex: none;
+  padding: 0 0.3rem;
+  border-radius: 2px;
+  font-size: 0.5625rem;
+  letter-spacing: 0.05em;
+  background: var(--paper-3);
+  color: var(--ink-2);
+}
+.board .status .k[data-kind="bash"],
+.board .status .k[data-kind="task"],
+.board .status .k[data-kind="web"],
+.board .status .k[data-kind="mcp"],
+.board .status .k[data-kind="plan"] { background: var(--slate-soft); color: var(--slate); }
+.board .status .k[data-kind="edit"],
+.board .status .k[data-kind="write"],
+.board .status .k[data-kind="approve"],
+.board .status .k[data-kind="terminal"],
+.board .status .k[data-kind="ask"] { background: var(--amber-soft); color: var(--amber); }
+.board .status .k[data-kind="reply"] { background: var(--ember-soft); color: var(--ember); }
+.board .status .k[data-kind="stop"] { background: var(--del-bg); color: var(--del); }
+.board .status .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.board .status .clock { margin-left: auto; flex: none; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.board .status .clock.warn { color: var(--amber); }
+
+.board .pulse {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--slate);
+  flex: none;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+.board .card .foot {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.15rem;
+  font-size: 0.5625rem;
+  color: var(--ink-3);
+  letter-spacing: 0.04em;
+}
+.board .foot .queued {
+  color: var(--ember);
+  border: 1px solid color-mix(in oklch, var(--ember) 40%, transparent);
+  border-radius: 2px;
+  padding: 0 0.25rem;
+}
+.board .foot .kept {
+  color: var(--amber);
+  border: 1px solid color-mix(in oklch, var(--amber) 40%, transparent);
+  border-radius: 2px;
+  padding: 0 0.2rem;
+  font-size: 0.5rem;
+  letter-spacing: 0.06em;
+}
+.board .foot .act { margin-left: auto; display: flex; gap: 0.3rem; }
+.board .foot .btn { padding: 0.2rem 0.45rem; font-size: 0.625rem; }
+.board .btn.primary { background: var(--ember); border-color: var(--ember); color: var(--paper); }
+.board .btn.primary:hover { background: color-mix(in oklch, var(--ember) 88%, var(--ink)); color: var(--paper); }
+
+/* done: a strip with a count until opened */
+.board .col.done-strip {
+  flex: 0 0 3rem;
+  align-items: center;
+  padding-top: 0.55rem;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+.board .done-strip:hover { background: var(--paper-3); }
+.board .done-strip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); }
+.board .done-strip .n { font-size: 0.75rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.board .done-strip .vlabel {
+  writing-mode: vertical-rl;
+  font-size: 0.5625rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-top: 0.4rem;
+}
+.board .done-strip .kept {
+  margin-top: auto;
+  margin-bottom: 0.6rem;
+  writing-mode: vertical-rl;
+  font-size: 0.5rem;
+  letter-spacing: 0.08em;
+  color: var(--amber);
+}
+.board .col[data-phase="done"] .card { padding: 0.4rem 0.6rem 0.45rem; box-shadow: none; }
+.board .col[data-phase="done"] .card .title { font-size: 0.85rem; }
+
+@media (max-width: 60rem) {
+  .board { --col-w: 16rem; padding: 0.75rem 1rem 1rem; scroll-snap-type: x mandatory; }
+  .board .col { scroll-snap-align: start; }
+}

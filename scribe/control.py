@@ -91,6 +91,11 @@ class ControlState:
     def open_call(self, call: PendingCall, wait_s: float) -> PendingCall:
         call.deadline = time.time() + wait_s
         with self._lock:
+            # Decided calls are kept a while so a late explanation can still
+            # find its card, but not forever.
+            cutoff = time.time() - 600
+            for stale in [k for k, c in self._pending.items() if c.behavior and c.created < cutoff]:
+                self._pending.pop(stale, None)
             self._pending[call.call_id] = call
         return call
 

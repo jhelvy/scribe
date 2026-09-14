@@ -55,6 +55,13 @@ PORT_ATTEMPTS = 20
 INDEX_RESCAN_S = 4.0
 IDLE_EVICT_S = 900
 MAX_LOADED = 8
+#: A session counts as live on the board for this long after its last hook
+#: contact. SessionEnd removes it at once; this is for terminals that were
+#: killed instead of exited, so a dead card cannot linger forever.
+LIVE_S = 2 * 3600
+#: Without hooks there is no presence signal at all, so a transcript that
+#: changed this recently is presumed to have a process behind it.
+LIVE_GRACE_S = 600
 
 
 # ==================================================================== hub
@@ -75,6 +82,7 @@ class LiveSession:
         self.touched = time.time()
         self.dirty = True
         self.web_messages: list[dict] = []
+        self.state: dict = {}
         self._lock = threading.RLock()
 
     @property
@@ -116,6 +124,7 @@ class LiveSession:
         self._merge_web_messages(session)
         explain.attach(session, self.explainer, self.cfg)
         self.session = session
+        self.state = build.turn_state(rows, session.cwd or self.ref.cwd)
         self.touched = time.time()
 
         renderer = render_json.JsonRenderer(redactor)
@@ -219,6 +228,12 @@ class Hub:
         self.index: list[transcript.SessionRef] = []
         self.subscribers: list[Subscriber] = []
         self.registered: dict[str, float] = {}  # session_id -> last hook contact
+        # Presence for the board. `registered` is evicted after IDLE_EVICT_S to
+        # stop polling; a card should outlive that, so contact is kept here too.
+        self.presence: dict[str, float] = {}
+        self.ended: set[str] = set()
+        self.attention: dict[str, str] = {}  # session_id -> last Notification type
+        self._card_sig: dict[str, str] = {}
         self._explain_origin: dict[str, str] = {}  # call_id -> session, for on-demand
         self._lock = threading.RLock()
         self._last_index_scan = 0.0
@@ -252,20 +267,101 @@ class Hub:
             pass
         self.request_search_sync(fresh)
         with self._lock:
-            changed = [r.session_id for r in fresh] != [r.session_id for r in self.index]
+            before = [(r.session_id, r.state.get("phase"), r.state.get("since")) for r in self.index]
+            after = [(r.session_id, r.state.get("phase"), r.state.get("since")) for r in fresh]
             self.index = fresh
-        return changed
+        return before != after
 
     def index_payload(self) -> list[dict]:
         with self._lock:
             refs = list(self.index)
-        out = []
-        for ref in refs:
-            item = ref.as_dict()
-            item["live"] = ref.session_id in self.registered
-            item["armed"] = self.control.is_armed(ref.session_id)
-            out.append(item)
-        return out
+        return [self.card_for(ref) for ref in refs]
+
+    # -- the board ------------------------------------------------------
+
+    def is_live(self, ref: transcript.SessionRef, now: float | None = None) -> bool:
+        now = now or time.time()
+        sid = ref.session_id
+        if sid in self.ended:
+            return False
+        seen = self.presence.get(sid)
+        if seen is not None:
+            return now - seen < LIVE_S
+        return now - ref.mtime < LIVE_GRACE_S
+
+    def card_for(self, ref: transcript.SessionRef) -> dict:
+        """One session as the board sees it.
+
+        The transcript decides the phase (:func:`build.turn_state`); what the
+        daemon adds is the part a file cannot know — whether a process is still
+        behind it, whether an approval is being held here, and what the last
+        ``Notification`` hook said. Those only ever refine the answer.
+        """
+        sid = ref.session_id
+        item = ref.as_dict()
+        with self._lock:
+            live = self.sessions.get(sid)
+        state = dict(live.state) if live is not None and live.state else dict(ref.state)
+        alive = self.is_live(ref)
+        pending = [
+            {
+                "call_id": c.call_id,
+                "token": c.token,
+                "tool_name": c.tool_name,
+                "subject": build.tool_subject(c.tool_name, c.tool_input, ref.cwd),
+                "seconds_left": round(c.seconds_left(), 1),
+                "explanation": c.explanation,
+            }
+            for c in self.control.pending_for(sid)
+        ]
+        attention = self.attention.get(sid, "")
+
+        if not alive:
+            phase = "done"
+        elif pending:
+            phase = "needs_you"
+            state["activity"] = pending[-1]["tool_name"] + "  " + pending[-1]["subject"]
+            state["activity_kind"] = "approve"
+        elif attention == "permission_prompt":
+            phase = "needs_you"
+            state["activity"] = (state.get("activity") or "a tool call") + "  · in the terminal"
+            state["activity_kind"] = "terminal"
+        elif attention == "idle_prompt" and state.get("phase") == "working":
+            phase = "your_turn"
+        elif state.get("phase") in ("", "idle"):
+            phase = "your_turn"
+            state["activity"] = "waiting for the first prompt"
+            state["activity_kind"] = "reply"
+        else:
+            phase = state["phase"]
+        if phase == "working" and state.get("mode") == "plan":
+            phase = "planning"
+
+        item["live"] = alive
+        item["armed"] = self.control.is_armed(sid)
+        item["phase"] = phase
+        item["state"] = state
+        item["pending"] = pending
+        item["queued"] = len(self.control.queued(sid))
+        return item
+
+    def announce_card(self, session_id: str) -> None:
+        """Broadcast a session's card if anything on it changed."""
+        with self._lock:
+            ref = next((r for r in self.index if r.session_id == session_id), None)
+        if ref is None:
+            return
+        card = self.card_for(ref)
+        sig = json.dumps(
+            [card["phase"], card["state"], [p["call_id"] for p in card["pending"]], card["queued"], card["live"]],
+            sort_keys=True,
+            default=str,
+        )
+        with self._lock:
+            if self._card_sig.get(session_id) == sig:
+                return
+            self._card_sig[session_id] = sig
+        self.broadcast(None, "card", card)
 
     def request_search_sync(self, refs=None) -> None:
         """Reindex changed sessions on a worker thread.
@@ -364,6 +460,7 @@ class Hub:
             return
         if not announce:
             return
+        self.announce_card(live.id)
         if changed or removed:
             self.broadcast(
                 live.id,
@@ -446,6 +543,8 @@ class Hub:
         with self._lock:
             first = session_id not in self.registered
             self.registered[session_id] = time.time()
+            self.presence[session_id] = time.time()
+            self.ended.discard(session_id)
         if first:
             self.refresh_index(force=True)
             self.broadcast(None, "sessions", self.index_payload())
@@ -504,10 +603,28 @@ class Hub:
             if session_id not in {l.id for l in loaded}:
                 self.get(session_id)
 
+        # Sessions the board shows as live are read whole rather than from a
+        # tail slice, so their card can say when the turn started even when
+        # the prompt is a megabyte of tool output back. Bounded: `_evict`
+        # drops the coldest once MAX_LOADED is passed.
+        have = {l.id for l in loaded} | watched | registered
+        for ref in refs:
+            if len(have) >= MAX_LOADED:
+                break
+            if ref.session_id not in have and self.is_live(ref, now):
+                have.add(ref.session_id)
+                self.get(ref.session_id)
+
         with self._lock:
             for session_id, last in list(self.registered.items()):
                 if now - last > IDLE_EVICT_S:
                     self.registered.pop(session_id, None)
+            stale = [sid for sid, last in self.presence.items() if now - last > LIVE_S]
+            for session_id in stale:
+                self.presence.pop(session_id, None)
+                self.attention.pop(session_id, None)
+        for session_id in stale:
+            self.announce_card(session_id)
 
 
 # ==================================================================== HTTP
@@ -659,6 +776,7 @@ class Handler(BaseHTTPRequestHandler):
             call = self.hub.control.get_pending(call_id)
             if call is not None:
                 self.hub.broadcast(call.session_id, "pending", call.as_dict())
+                self.hub.announce_card(call.session_id)
             return self._json({"ok": ok})
 
         if route == "/api/message":
@@ -670,6 +788,7 @@ class Handler(BaseHTTPRequestHandler):
             live = self.hub.get(session_id, create=False)
             if live is not None:
                 self.hub.broadcast(session_id, "queue", {"queued": self.hub.control.queued(session_id)})
+            self.hub.announce_card(session_id)
             return self._json({"ok": bool(depth), "queued": depth})
 
         if route == "/api/unqueue":
@@ -677,6 +796,7 @@ class Handler(BaseHTTPRequestHandler):
             index = int(data.get("index") or 0)
             self.hub.control.drop_queued(session_id, index)
             self.hub.broadcast(session_id, "queue", {"queued": self.hub.control.queued(session_id)})
+            self.hub.announce_card(session_id)
             return self._json({"ok": True})
 
         if route == "/api/arm":
@@ -845,25 +965,40 @@ def dispatch(hub: Hub, payload: dict) -> dict:
     if event == "SessionEnd":
         hub.poke(session_id)
         hub.control.forget(session_id)
+        with hub._lock:
+            hub.presence.pop(session_id, None)
+            hub.registered.pop(session_id, None)
+            hub.attention.pop(session_id, None)
+            hub.ended.add(session_id)
+        hub.announce_card(session_id)
         return {}
 
     if event == "UserPromptSubmit":
         # A real prompt from the terminal ends any chain of injected replies.
         hub.control.reset_chain(session_id)
+        hub.attention.pop(session_id, None)
         hub.poke(session_id)
         return {}
 
-    if event in ("PostToolUse", "PostToolUseFailure", "SubagentStop", "Notification"):
+    if event == "Notification":
+        # `permission_prompt` and `idle_prompt` are the two things the terminal
+        # knows that the transcript does not: a dialog is up, or Claude has
+        # been waiting on the person for a while.
+        kind = str(payload.get("notification_type") or "")
+        if kind:
+            hub.attention[session_id] = kind
         hub.poke(session_id)
-        if event == "Notification":
-            hub.broadcast(
-                session_id,
-                "notify",
-                {
-                    "type": payload.get("notification_type") or "",
-                    "message": payload.get("message") or "",
-                },
-            )
+        hub.announce_card(session_id)
+        hub.broadcast(
+            session_id,
+            "notify",
+            {"type": kind, "message": payload.get("message") or ""},
+        )
+        return {}
+
+    if event in ("PostToolUse", "PostToolUseFailure", "SubagentStop"):
+        hub.attention.pop(session_id, None)
+        hub.poke(session_id)
         return {}
 
     if event == "PermissionRequest":
@@ -903,6 +1038,8 @@ def handle_permission(hub: Hub, payload: dict) -> dict:
 
     hub.control.open_call(pending, wait_s if hold else 0.0)
     hub.broadcast(session_id, "pending", {**pending.as_dict(), "holding": hold})
+    hub.attention.pop(session_id, None)
+    hub.announce_card(session_id)
 
     # The explanation is requested either way: reading it while you decide is
     # the point, whether you decide in the browser or in the terminal.
@@ -910,12 +1047,17 @@ def handle_permission(hub: Hub, payload: dict) -> dict:
     hub.poke(session_id)
 
     if not hold:
+        # The terminal decides. Mark it so, or the call would sit in the
+        # pending set for good and keep the board's card on "needs you".
+        hub.control.resolve(call_id, "pass", None, "terminal")
+        hub.announce_card(session_id)
         return {}
 
     behavior, updated = hub.control.wait_for(
         pending, wait_s, still_watching=lambda: hub.has_clients(session_id)
     )
     hub.broadcast(session_id, "pending", {**pending.as_dict(), "holding": False})
+    hub.announce_card(session_id)
 
     if behavior == "allow":
         decision = {"behavior": "allow"}
@@ -934,6 +1076,7 @@ def handle_permission(hub: Hub, payload: dict) -> dict:
 
 def handle_stop(hub: Hub, payload: dict) -> dict:
     session_id = payload.get("session_id") or ""
+    hub.attention.pop(session_id, None)
     hub.poke(session_id)
 
     queue_cfg = hub.cfg.get("reply_queue") or {}

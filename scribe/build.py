@@ -237,6 +237,139 @@ def tool_subject(name: str, tool_input: dict, cwd: str = "") -> str:
     return ""
 
 
+# ---------------------------------------------------------------- turn state
+
+#: Tools whose call is a question to the person, not work. A pending one means
+#: the session is blocked on them, not on the model.
+ASKS = ("AskUserQuestion", "ExitPlanMode")
+
+#: What Claude Code writes as the user text when a turn is cut short.
+INTERRUPTED = "[Request interrupted"
+
+
+def turn_state(rows, cwd: str = "") -> dict:
+    """Where a session stands right now, read off the tail of its transcript.
+
+    This is what puts a session in a column on the board, and it is a function
+    of the rows alone — the same rule as the rest of the model. Hooks make the
+    answer arrive sooner; they never change it. Only the last content row
+    matters, so the scan walks backwards and stops early, which keeps it cheap
+    enough to run on every ``peek`` and every poll.
+
+    ``phase`` is one of:
+
+    ``needs_you``  the last thing Claude did was ask — a question, or a plan
+                   waiting to be approved.
+    ``working``    a tool is running, or Claude is mid-reply.
+    ``your_turn``  Claude ended its turn (``stop_reason: end_turn``) or the
+                   person interrupted it; either way the next move is theirs.
+    ``idle``       no content rows at all.
+
+    Whether the process behind the transcript is still alive is not knowable
+    from the file, so ``done`` is decided by the daemon, not here.
+    """
+    state = {
+        "phase": "idle",
+        "mode": "",
+        "activity": "",
+        "activity_kind": "",
+        "reply": "",
+        "since": "",
+        "turn_started": "",
+        "tool": "",
+    }
+    rows = [r for r in rows if isinstance(r, dict)]
+
+    for row in reversed(rows):
+        if row.get("type") == "permission-mode" and row.get("permissionMode"):
+            state["mode"] = str(row["permissionMode"])
+            break
+
+    decided = False
+    for i in range(len(rows) - 1, -1, -1):
+        row = rows[i]
+        kind = row.get("type")
+        if kind not in ("user", "assistant") or row.get("isSidechain"):
+            continue
+        blocks = [b for b in _blocks(row) if isinstance(b, dict)]
+
+        if kind == "user":
+            if row.get("isMeta"):
+                continue
+            if any(b.get("type") == "tool_result" for b in blocks):
+                if not decided:
+                    if any(INTERRUPTED in str(b.get("content") or "")[:80] for b in blocks):
+                        state.update(phase="your_turn", activity="interrupted", activity_kind="stop")
+                    else:
+                        state.update(phase="working", activity="thinking", activity_kind="wait")
+                    state["since"] = row.get("timestamp") or ""
+                    decided = True
+                continue
+            text = user_prompt_text(row)
+            if not text and not any(b.get("type") == "image" for b in blocks):
+                continue
+            if not decided:
+                if text.startswith(INTERRUPTED):
+                    state.update(phase="your_turn", activity="interrupted", activity_kind="stop")
+                else:
+                    state.update(phase="working", activity="reading the prompt", activity_kind="wait")
+                state["since"] = row.get("timestamp") or ""
+                decided = True
+            if not text.startswith(INTERRUPTED):
+                state["turn_started"] = row.get("timestamp") or ""
+                break
+            continue
+
+        # assistant
+        if decided:
+            continue
+        message = row.get("message") if isinstance(row.get("message"), dict) else {}
+        stop = str(message.get("stop_reason") or "")
+        calls = [b for b in blocks if b.get("type") == "tool_use"]
+        state["since"] = row.get("timestamp") or ""
+        if calls:
+            call = calls[-1]
+            name = str(call.get("name") or "Tool")
+            subject = tool_subject(name, call.get("input") or {}, cwd)
+            if name in ASKS:
+                state.update(
+                    phase="needs_you",
+                    activity=subject or ("plan ready" if name == "ExitPlanMode" else "question"),
+                    activity_kind="plan" if name == "ExitPlanMode" else "ask",
+                )
+            else:
+                state.update(phase="working", activity=subject or name, activity_kind=tool_kind(name))
+                state["tool"] = name
+        elif (stop and stop != "tool_use") or (not stop and any(b.get("type") == "text" for b in blocks)):
+            # `end_turn` is the clean signal. Older transcripts omit the stop
+            # reason; there a final text block is taken as the end of the turn,
+            # because a tool call would have followed it within a second.
+            state.update(phase="your_turn", activity="replied", activity_kind="reply")
+            state["reply"] = _last_text(rows, i)
+        else:
+            state.update(phase="working", activity="thinking", activity_kind="wait")
+        decided = True
+
+    return state
+
+
+def _last_text(rows: list[dict], end: int, limit: int = 160) -> str:
+    """First line of the final text block of the message ending at ``end``."""
+    request = rows[end].get("requestId") or (rows[end].get("message") or {}).get("id") or ""
+    for j in range(end, -1, -1):
+        row = rows[j]
+        if row.get("type") != "assistant":
+            break
+        same = (row.get("requestId") or (row.get("message") or {}).get("id") or "") == request
+        if request and not same:
+            break
+        for block in reversed(_blocks(row)):
+            if isinstance(block, dict) and block.get("type") == "text" and (block.get("text") or "").strip():
+                first = next((ln for ln in block["text"].splitlines() if ln.strip()), "")
+                return _one_line(first.replace("**", "").replace("`", "").lstrip("#>- ").strip(), limit)
+    return ""
+
+
 # ---------------------------------------------------------------- the builder
 
 

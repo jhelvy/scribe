@@ -42,6 +42,10 @@
     folded: false,
     es: null,
     reconnect: 0,
+    view: "session",    // session | board
+    doneOpen: false,    // the board's done column, expanded or a strip
+    boardTick: null,
+    cfg: {},
   };
 
   /* ----------------------------------------------------------------- utils */
@@ -930,7 +934,7 @@
       var body = el("div", "project-sessions");
       sessions.forEach(function (session) {
         var button = el("button", "session-item");
-        button.setAttribute("aria-current", String(session.id === state.sessionId));
+        button.setAttribute("aria-current", String(state.view !== "board" && session.id === state.sessionId));
         button.appendChild(el("span", "t", session.title || session.id.slice(0, 8)));
         var meta = el("span", "m");
         if (session.live) meta.appendChild(el("span", "live-dot"));
@@ -957,7 +961,9 @@
   }
 
   function selectSession(id) {
-    if (!id || id === state.sessionId) return;
+    if (!id) return;
+    if (id === state.sessionId && state.view !== "board") return;
+    leaveBoard();
     state.sessionId = id;
     location.hash = "#/s/" + id;
     resetView();
@@ -976,6 +982,308 @@
     state.pending.clear();
     state.focusKey = null;
     state.following = true;
+  }
+
+  /* ----------------------------------------------------------------- board */
+
+  // Live sessions as cards, one column per thing a session can be waiting
+  // on. The column comes from the server (`phase`), which reads it off the
+  // transcript's tail; the board only draws. It is redrawn whole on every
+  // change — unlike the conversation, a card holds no state worth keeping.
+  var COLUMNS = [
+    { key: "needs_you", label: "needs you", empty: "nothing is waiting on you" },
+    { key: "planning", label: "planning", empty: "no session is in plan mode" },
+    { key: "working", label: "working", empty: "nothing is running" },
+    { key: "your_turn", label: "your turn", empty: "no replies waiting to be read" },
+  ];
+  var DONE_CAP = 60;
+
+  function ago(ts) {
+    var d = (Date.now() - Date.parse(ts)) / 1000;
+    if (!(d >= 0)) return "";
+    if (d < 60) return Math.floor(d) + "s";
+    if (d < 3600) return Math.floor(d / 60) + "m";
+    if (d < 86400) return Math.floor(d / 3600) + "h";
+    return Math.floor(d / 86400) + "d";
+  }
+
+  function elapsed(ts) {
+    var d = (Date.now() - Date.parse(ts)) / 1000;
+    if (!(d >= 0)) return "";
+    var m = Math.floor(d / 60), sec = Math.floor(d % 60);
+    if (d < 3600) return m + "m " + (sec < 10 ? "0" : "") + sec + "s";
+    return Math.floor(d / 3600) + "h " + (m % 60) + "m";
+  }
+
+  function clockText(node) {
+    var mode = node.dataset.mode;
+    if (mode === "countdown") {
+      var left = Math.max(0, Math.round((Number(node.dataset.until) - Date.now()) / 1000));
+      return left + "s";
+    }
+    if (mode === "elapsed") return elapsed(node.dataset.from);
+    return ago(node.dataset.from);
+  }
+
+  function clock(mode, from, until) {
+    var node = el("span", "clock");
+    node.dataset.mode = mode;
+    if (from) node.dataset.from = from;
+    if (until) node.dataset.until = String(until);
+    if (mode === "countdown") node.classList.add("warn");
+    node.textContent = clockText(node);
+    return node;
+  }
+
+  function tickClocks() {
+    document.querySelectorAll("#board .clock").forEach(function (node) {
+      var text = clockText(node);
+      if (node.textContent !== text) node.textContent = text;
+    });
+  }
+
+  function cardStatus(session) {
+    var st = session.state || {};
+    var status = el("div", "status");
+    var pending = session.pending && session.pending[0];
+    var kind, text, chip;
+
+    if (session.phase === "needs_you") {
+      if (pending) {
+        kind = "approve"; chip = pending.tool_name; text = pending.subject || pending.tool_name;
+      } else if (st.activity_kind === "terminal") {
+        kind = "terminal"; chip = "terminal"; text = st.activity;
+      } else {
+        kind = st.activity_kind || "ask"; chip = kind === "plan" ? "plan" : "ask"; text = st.activity;
+      }
+    } else if (session.phase === "working" || session.phase === "planning") {
+      status.appendChild(el("span", "pulse"));
+      kind = st.activity_kind || "wait"; chip = st.tool || (session.phase === "planning" ? "plan" : "…");
+      text = st.activity || "";
+    } else {
+      kind = st.activity_kind === "stop" ? "stop" : "reply";
+      chip = st.activity_kind === "stop" ? "interrupted" : (st.reply ? "replied" : "idle");
+      text = st.reply || st.activity || "";
+    }
+
+    var k = el("span", "k", chip);
+    k.dataset.kind = kind;
+    status.appendChild(k);
+    status.appendChild(el("span", "text", text));
+
+    if (pending && pending.seconds_left > 0) {
+      status.appendChild(clock("countdown", null, Date.now() + pending.seconds_left * 1000));
+    } else if (session.phase === "working" || session.phase === "planning") {
+      status.appendChild(clock("elapsed", st.turn_started || st.since || session.updated));
+    } else {
+      status.appendChild(clock("ago", st.since || session.updated));
+    }
+    return status;
+  }
+
+  function cardActions(session) {
+    var act = el("span", "act");
+    var pending = session.pending && session.pending[0];
+    function button(label, primary, onClick) {
+      var b = el("button", "btn" + (primary ? " primary" : ""), label);
+      b.type = "button";
+      b.addEventListener("click", function (ev) { ev.stopPropagation(); onClick(); });
+      act.appendChild(b);
+    }
+    if (pending) {
+      button("deny", false, function () { decideFromBoard(pending.call_id, "deny"); });
+      button("approve", true, function () { decideFromBoard(pending.call_id, "allow"); });
+    } else if (session.phase === "needs_you") {
+      // A terminal dialog is answered in the terminal; here you can only look.
+      var terminal = session.state && session.state.activity_kind === "terminal";
+      button(terminal ? "open" : "answer", !terminal, function () { selectSession(session.id); });
+    } else if (session.phase === "your_turn") {
+      if (state.cfg.reply_queue && state.cfg.reply_queue.enabled && session.live) {
+        button("reply", false, function () { replyFromBoard(session.id); });
+      }
+      button("read", true, function () { selectSession(session.id); });
+    } else if (session.phase !== "done") {
+      button("open", false, function () { selectSession(session.id); });
+    }
+    return act;
+  }
+
+  function renderCard(session) {
+    var card = el("article", "card");
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+
+    var head = el("div", "head");
+    head.appendChild(el("span", "proj", session.project || ""));
+    if (session.git_branch) head.appendChild(el("span", "branch", session.git_branch));
+    head.appendChild(el("span", "id", (session.id || "").slice(0, 8)));
+    card.appendChild(head);
+
+    card.appendChild(el("div", "title", session.title || session.id.slice(0, 8)));
+
+    if (session.phase !== "done") card.appendChild(cardStatus(session));
+
+    var foot = el("div", "foot");
+    if (session.phase === "done") {
+      foot.appendChild(el("span", null, dateOf(session.updated) + " " + timeOf(session.updated)));
+    } else {
+      foot.appendChild(el("span", null, "since " + timeOf(session.started)));
+    }
+    if (session.queued) foot.appendChild(el("span", "queued", session.queued + " queued"));
+    if (session.archived) {
+      var kept = el("span", "kept", "kept");
+      kept.title = "Claude Code deleted the original — preserved by scribe";
+      foot.appendChild(kept);
+    }
+    foot.appendChild(cardActions(session));
+    card.appendChild(foot);
+
+    card.addEventListener("click", function () { selectSession(session.id); });
+    card.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectSession(session.id); }
+    });
+    return card;
+  }
+
+  function columnNode(key, label, count, items, emptyText) {
+    var section = el("section", "col");
+    section.dataset.phase = key;
+    var head = el("div", "colhead");
+    head.appendChild(el("span", "dot"));
+    head.appendChild(el("span", null, label));
+    head.appendChild(el("span", "count", String(count)));
+    section.appendChild(head);
+    var cards = el("div", "cards");
+    if (!items.length) cards.appendChild(el("div", "col-empty", emptyText));
+    items.forEach(function (session) { cards.appendChild(renderCard(session)); });
+    section.appendChild(cards);
+    return section;
+  }
+
+  function renderDone(done) {
+    var kept = done.filter(function (s) { return s.archived; }).length;
+    if (!state.doneOpen) {
+      var strip = el("section", "col done-strip");
+      strip.dataset.phase = "done";
+      strip.title = "every session with no process behind it, newest first";
+      strip.setAttribute("role", "button");
+      strip.tabIndex = 0;
+      strip.appendChild(el("span", "dot"));
+      strip.appendChild(el("span", "n", String(done.length)));
+      strip.appendChild(el("span", "vlabel", "done"));
+      if (kept) strip.appendChild(el("span", "kept", kept + " kept"));
+      var open = function () {
+        state.doneOpen = true;
+        renderBoard();
+        var col = $("board").querySelector('.col[data-phase="done"]');
+        if (col) col.scrollIntoView({ inline: "end", block: "nearest", behavior: reduceMotion ? "auto" : "smooth" });
+      };
+      strip.addEventListener("click", open);
+      strip.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(); }
+      });
+      return strip;
+    }
+    var shown = done.slice(0, DONE_CAP);
+    var section = columnNode("done", "done", done.length, shown, "nothing finished yet");
+    var fold = el("button", "fold", "⇥");
+    fold.type = "button";
+    fold.title = "collapse";
+    fold.addEventListener("click", function () { state.doneOpen = false; renderBoard(); });
+    section.querySelector(".colhead").appendChild(fold);
+    if (done.length > shown.length) {
+      section.appendChild(el("div", "col-more", (done.length - shown.length) + " more in the list"));
+    }
+    return section;
+  }
+
+  function renderBoard() {
+    if (state.view !== "board") return;
+    var board = $("board");
+    clear(board);
+
+    var groups = {};
+    COLUMNS.forEach(function (c) { groups[c.key] = []; });
+    var done = [];
+    state.sessions.forEach(function (session) {
+      if (groups[session.phase]) groups[session.phase].push(session);
+      else done.push(session);
+    });
+    // Whoever has waited longest on you comes first; everything else newest first.
+    var sinceOf = function (s) { return Date.parse((s.state && s.state.since) || s.updated || 0) || 0; };
+    groups.needs_you.sort(function (a, b) { return sinceOf(a) - sinceOf(b); });
+    ["planning", "working", "your_turn"].forEach(function (key) {
+      groups[key].sort(function (a, b) { return sinceOf(b) - sinceOf(a); });
+    });
+
+    COLUMNS.forEach(function (col) {
+      board.appendChild(columnNode(col.key, col.label, groups[col.key].length, groups[col.key], col.empty));
+    });
+    board.appendChild(renderDone(done));
+
+    var live = state.sessions.filter(function (s) { return s.phase && s.phase !== "done"; }).length;
+    var projects = new Set(state.sessions.filter(function (s) { return s.phase !== "done"; })
+      .map(function (s) { return s.project; })).size;
+    var facts = $("session-facts");
+    clear(facts);
+    [live + " live", groups.needs_you.length + " need you", projects + " project" + (projects === 1 ? "" : "s")]
+      .forEach(function (bit) { facts.appendChild(el("span", null, bit)); });
+    var needs = groups.needs_you.length;
+    document.title = (needs ? "(" + needs + ") " : "") + "board · scribe";
+  }
+
+  function decideFromBoard(callId, behavior) {
+    api("/api/decision", { call_id: callId, behavior: behavior }).then(function (r) {
+      if (r && r.error) return toast(r.error);
+      toast(behavior === "allow" ? "approved" : "denied");
+    });
+  }
+
+  function replyFromBoard(id) {
+    selectSession(id);
+    requestAnimationFrame(function () {
+      var input = $("compose-input");
+      if (input && !$("dock").hidden) input.focus();
+    });
+  }
+
+  function showBoard() {
+    if (state.view === "board") return;
+    state.view = "board";
+    document.body.dataset.view = "board";
+    $("board").hidden = false;
+    $("session-title").textContent = "board";
+    $("board-toggle").setAttribute("aria-pressed", "true");
+    if (location.hash !== "#/board") location.hash = "#/board";
+    // Subscribe with no session: the stream then carries only what every
+    // page gets — the session list and card updates.
+    openStream("");
+    renderBoard();
+    renderSidebar();
+    clearInterval(state.boardTick);
+    state.boardTick = setInterval(tickClocks, 1000);
+  }
+
+  function leaveBoard() {
+    if (state.view !== "board") return;
+    state.view = "session";
+    document.body.dataset.view = "session";
+    $("board").hidden = true;
+    $("board-toggle").setAttribute("aria-pressed", "false");
+    clearInterval(state.boardTick);
+    state.boardTick = null;
+  }
+
+  function toggleBoard() {
+    if (state.view !== "board") return showBoard();
+    var back = state.sessionId || (state.sessions[0] && state.sessions[0].id);
+    if (back) selectSession(back);
+  }
+
+  function mergeCard(card) {
+    var index = state.sessions.findIndex(function (s) { return s.id === card.id; });
+    if (index < 0) state.sessions.unshift(card);
+    else state.sessions[index] = card;
   }
 
   /* ------------------------------------------------------------------ data */
@@ -1103,6 +1411,12 @@
     es.addEventListener("sessions", function (ev) {
       state.sessions = JSON.parse(ev.data);
       renderSidebar();
+      renderBoard();
+    });
+    es.addEventListener("card", function (ev) {
+      mergeCard(JSON.parse(ev.data));
+      renderSidebar();
+      renderBoard();
     });
     es.addEventListener("notify", function (ev) {
       var data = JSON.parse(ev.data);
@@ -1129,6 +1443,10 @@
     });
 
     $("theme-toggle").addEventListener("click", toggleTheme);
+    $("board-toggle").addEventListener("click", function () {
+      toggleBoard();
+      $("sidebar").dataset.open = "false";
+    });
 
     $("collapse-toggle").addEventListener("click", function () {
       state.folded = !state.folded;
@@ -1252,6 +1570,8 @@
       stepRound(ev.key === "j" ? 1 : -1);
     } else if (ev.key === "t") {
       toggleTheme();
+    } else if (ev.key === "b") {
+      toggleBoard();
     } else if (ev.key === ".") {
       state.following = true;
       scrollToBottom();
@@ -1280,8 +1600,9 @@
   /* ------------------------------------------------------------------ boot */
 
   function fromHash() {
+    if (location.hash === "#/board") return showBoard();
     var match = /^#\/s\/([\w-]+)$/.exec(location.hash || "");
-    if (match && match[1] !== state.sessionId) selectSession(match[1]);
+    if (match && (match[1] !== state.sessionId || state.view === "board")) selectSession(match[1]);
   }
 
   function notice(lines) {
@@ -1346,7 +1667,7 @@
     applyHead();
     applyRounds(snapshot.rounds || [], []);
     document.body.dataset.static = "true";
-    ["arm-toggle", "dock"].forEach(function (id) { $(id).hidden = true; });
+    ["arm-toggle", "dock", "board-toggle"].forEach(function (id) { $(id).hidden = true; });
     $("conn-dot").title = "exported file — not live";
     requestAnimationFrame(function () { scheduleRail(true); });
   }
@@ -1356,9 +1677,11 @@
     installRenderer();
     state.openProjects = loadOpenProjects();
     bind();
+    api("/api/config").then(function (cfg) { if (cfg && !cfg.error) state.cfg = cfg; });
     api("/api/sessions").then(function (data) {
       state.sessions = (data && data.sessions) || [];
       renderSidebar();
+      if (location.hash === "#/board") return showBoard();
       var match = /^#\/s\/([\w-]+)$/.exec(location.hash || "");
       var wanted = match ? match[1] : state.sessions.length ? state.sessions[0].id : null;
       if (!wanted) return showEmpty();

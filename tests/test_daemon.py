@@ -390,3 +390,95 @@ class TestConfigReload(DaemonHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBoard(DaemonHarness):
+    """The card payload: the transcript's phase, refined by presence and hooks."""
+
+    def setUp(self):
+        super().setUp()
+        self.path = self.transcript_path(session_id="sess-1")
+        self.write_rows(self.path, simple_session("sess-1"))
+        self.hub.refresh_index(force=True)
+
+    def card(self, session_id="sess-1"):
+        for item in self.get("/api/sessions")["sessions"]:
+            if item["id"] == session_id:
+                return item
+        self.fail("no card for " + session_id)
+
+    def test_a_fresh_transcript_is_live_and_on_your_turn(self):
+        card = self.card()
+        self.assertTrue(card["live"])
+        self.assertEqual(card["phase"], "your_turn")
+        self.assertEqual(card["state"]["reply"], "All 5 tests pass.")
+        self.assertEqual(card["pending"], [])
+
+    def test_an_old_transcript_without_hooks_is_done(self):
+        old = time.time() - 3600
+        os.utime(self.path, (old, old))
+        self.hub.refresh_index(force=True)
+        self.assertEqual(self.card()["phase"], "done")
+
+    def test_hook_contact_keeps_a_session_live_and_session_end_finishes_it(self):
+        old = time.time() - 3600
+        os.utime(self.path, (old, old))
+        self.hub.refresh_index(force=True)
+        daemon.dispatch(self.hub, {"hook_event_name": "PostToolUse", "session_id": "sess-1"})
+        self.assertEqual(self.card()["phase"], "your_turn")
+        daemon.dispatch(self.hub, {"hook_event_name": "SessionEnd", "session_id": "sess-1"})
+        card = self.card()
+        self.assertEqual(card["phase"], "done")
+        self.assertFalse(card["live"])
+        # A session that ended stays ended even though the file is still fresh.
+        os.utime(self.path, None)
+        self.hub.refresh_index(force=True)
+        self.assertEqual(self.card()["phase"], "done")
+
+    def test_terminal_permission_prompt_needs_you_until_the_tool_runs(self):
+        daemon.dispatch(self.hub, {"hook_event_name": "Notification", "session_id": "sess-1",
+                                   "notification_type": "permission_prompt", "message": "Bash wants to run"})
+        card = self.card()
+        self.assertEqual(card["phase"], "needs_you")
+        self.assertEqual(card["state"]["activity_kind"], "terminal")
+        daemon.dispatch(self.hub, {"hook_event_name": "PostToolUse", "session_id": "sess-1"})
+        self.assertEqual(self.card()["phase"], "your_turn")
+
+    def test_a_held_approval_needs_you_with_the_call_attached(self):
+        from scribe import control
+
+        call = control.PendingCall(call_id="toolu_Z", session_id="sess-1", tool_name="Bash",
+                                   tool_input={"command": "rm -rf build"})
+        self.hub.control.open_call(call, 30)
+        card = self.card()
+        self.assertEqual(card["phase"], "needs_you")
+        self.assertEqual(card["pending"][0]["call_id"], "toolu_Z")
+        self.assertEqual(card["pending"][0]["subject"], "rm -rf build")
+        self.assertGreater(card["pending"][0]["seconds_left"], 20)
+
+        self.assertTrue(self.post("/api/decision", {"call_id": "toolu_Z", "behavior": "allow"})["ok"])
+        self.assertEqual(self.card()["phase"], "your_turn")
+
+    def test_plan_mode_while_working_is_planning(self):
+        from helpers import assistant_row, tool_use
+
+        self.append_rows(self.path, [
+            {"type": "permission-mode", "permissionMode": "plan", "sessionId": "sess-1"},
+            assistant_row("sess-1", [tool_use("t2", "Read", {"file_path": "/tmp/proj/x.py"})],
+                          "2026-07-28T10:01:00.000Z", "a2"),
+        ])
+        self.hub.refresh_index(force=True)
+        self.assertEqual(self.card()["phase"], "planning")
+
+    def test_card_events_reach_every_stream(self):
+        # Subscribe with no session, as the board does, and watch a card arrive.
+        sub = self.hub.subscribe("")
+        daemon.dispatch(self.hub, {"hook_event_name": "SessionEnd", "session_id": "sess-1"})
+        events = []
+        while not sub.queue.empty():
+            events.append(sub.queue.get_nowait())
+        self.hub.unsubscribe(sub)
+        cards = [d for e, d in events if e == "card"]
+        self.assertTrue(cards)
+        self.assertEqual(cards[-1]["id"], "sess-1")
+        self.assertEqual(cards[-1]["phase"], "done")

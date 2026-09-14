@@ -163,6 +163,35 @@ the two sides apart — which is the "snap together" interaction, out of the sam
 solver. The module is DOM-free so `tests/test_rail.mjs` can drive it directly,
 including a brute-force optimality check.
 
+## The board
+
+`#/board` shows live sessions as cards in columns: *needs you*, *planning*,
+*working*, *your turn*, and a collapsed *done* strip for everything with no
+process behind it. The column is `build.turn_state(rows)`, a function of the
+transcript's tail like everything else: `stop_reason: end_turn` is your turn,
+a trailing `tool_use` is working, a trailing `AskUserQuestion` or
+`ExitPlanMode` needs you, the latest `permission-mode` row says whether
+working is planning. `peek` computes it for the index from the same tail slice
+it reads the title from; `LiveSession.rebuild` computes it from the whole file
+so the elapsed clock can find the prompt behind a megabyte of tool output.
+
+The daemon adds only what a file cannot know, in `Hub.card_for`: whether a
+process is alive (`presence`, fed by every hook and cleared by `SessionEnd`,
+with a ten-minute mtime grace for machines without hooks), whether an approval
+is being held here, and the last `Notification` type (`permission_prompt`
+means a dialog is up in the terminal; `idle_prompt` means Claude has been
+waiting). Those refine the phase; they never replace it. Cards travel on the
+`sessions` and `card` SSE events, which every stream receives, so the board
+subscribes with no session id.
+
+The board is redrawn whole on every change. Unlike the conversation column a
+card holds no state worth preserving, so the reconcile-in-place rule below
+does not apply to it.
+
+`peek` results are cached on (size, mtime). The index is rescanned every four
+seconds, and without the cache every rescan re-read the tail of every
+transcript on the machine.
+
 ## Viewer state
 
 Every round and item carries a server-assigned `key` (`_key_round` in
