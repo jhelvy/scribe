@@ -1403,3 +1403,7 @@ body[data-view="board"] #log-link { display: none !important; }
   .board { --col-w: 16rem; padding: 0.75rem 1rem 1rem; scroll-snap-type: x mandatory; }
   .board .col { scroll-snap-align: start; }
 }
+
+/* completion lists are wider than menus: a command name plus its description */
+.popover.complete { width: min(36rem, calc(100vw - 1rem)); max-height: 22rem; }
+.popover.complete .popover-item { padding: 0.3rem 0.5rem; }

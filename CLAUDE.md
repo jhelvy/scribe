@@ -70,6 +70,7 @@ scribe/
   control.py            approval holds and the reply queue (no transport)
   peer.py               messages into a session: the inbox socket
   driver.py             a headless Claude Code child the page drives (stream-json)
+  catalog.py            what `/` completes to: skills and commands, disk + Claude
   search.py             FTS5 index over every session, incremental
   explain.py            Haiku explainer, content-addressed cache
   install.py            writing hooks into settings.json
@@ -211,6 +212,14 @@ between turns, closed after `driver.idle_min`. Its docstring records what
 - **Two writers.** If the registry shows a terminal process for a driven
   session, `reap_drivers` stops the child once idle and the channel flips to
   `inbox`.
+
+**The slash catalogue has two halves.** Disk (`catalog.scan`: user, project
+and plugin skills/commands, front matter read without YAML) knows scope; only
+a driver's `initialize` answer knows the bundled skills and built-ins, with
+descriptions, so `catalog.remember` keeps the last one under
+`~/.scribe/cache/commands.json` for sessions with no driver. `available`
+decides per channel: a built-in on an inbox session is refused on the page
+with the reason, because the TUI reads a cross-session message as prose.
 
 **Uploads are files first.** `Hub.save_upload` writes to
 `~/.scribe/uploads/<session>/<id>-<name>` and the id is resolved by scanning

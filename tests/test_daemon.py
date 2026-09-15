@@ -552,6 +552,13 @@ class TestInboxDelivery(DaemonHarness):
         self.assertTrue(self.inbox.got.wait(2))
         self.assertIn("look\n\nAttached file: " + saved["path"], self.inbox.lines[1]["message"]["content"])
 
+    def test_a_terminal_session_gets_skills_but_not_builtins(self):
+        got = self.get("/api/commands?session_id=sess-1")
+        self.assertEqual(got["channel"], "inbox")
+        names = {c["name"]: c for c in got["commands"]}
+        self.assertFalse(names["compact"]["available"])
+        self.assertIn("terminal", names["compact"]["why"])
+
     def test_empty_and_unknown_are_refused(self):
         self.assertIn("error", self.post("/api/message", {"session_id": "sess-1", "text": "  "}))
         self.assertIn("error", self.post("/api/message", {"session_id": "nope", "text": "hi"}))
@@ -780,6 +787,43 @@ class TestDriverDelivery(DaemonHarness):
         self.hub.cfg["uploads"]["max_mb"] = 0.00001
         self.assertIn("error", self.upload("big.bin", b"x" * 100, "application/octet-stream"))
         self.assertIn("error", self.post("/api/message", {"session_id": "sess-1", "text": "", "attachments": ["nope"]}))
+
+    def test_the_catalogue_comes_from_disk_then_from_the_driver(self):
+        skills = paths.claude_home() / "skills" / "mine" / "SKILL.md"
+        skills.parent.mkdir(parents=True)
+        skills.write_text("---\nname: mine\ndescription: my skill\n---\n")
+        before = self.get("/api/commands?session_id=sess-1")
+        self.assertEqual(before["channel"], "spawn")
+        names = {c["name"]: c for c in before["commands"]}
+        self.assertIn("mine", names)
+        self.assertTrue(names["mine"]["available"])
+        self.assertNotIn("fake-skill", names)
+        self.post("/api/message", {"session_id": "sess-1", "text": "hi"})
+        self.assertTrue(self.wait_idle())
+        after = self.get("/api/commands?session_id=sess-1")
+        self.assertEqual(after["source"], "live")
+        names = {c["name"]: c for c in after["commands"]}
+        self.assertEqual(names["fake-skill"]["argument_hint"], "<topic>")
+        self.assertEqual(names["fake-skill"]["kind"], "skill")
+        self.assertEqual(names["compact"]["kind"], "builtin")
+        self.assertFalse(names["doctor"]["available"])
+        # What the driver reported is kept for sessions that have none.
+        self.hub.stop_driver("sess-1")
+        kept = self.get("/api/commands?session_id=sess-1")
+        self.assertEqual(kept["source"], "cache")
+        self.assertIn("fake-skill", {c["name"] for c in kept["commands"]})
+
+    def test_file_suggestions_come_from_the_driver_when_there_is_one(self):
+        (self.cwd / "src").mkdir()
+        (self.cwd / "src" / "thing.py").write_text("x")
+        disk = self.get("/api/files?session_id=sess-1&q=thing")
+        self.assertEqual(disk["source"], "disk")
+        self.assertEqual([f["path"] for f in disk["files"]], ["src/thing.py"])
+        self.post("/api/message", {"session_id": "sess-1", "text": "hi"})
+        self.assertTrue(self.wait_idle())
+        live = self.get("/api/files?session_id=sess-1&q=app")
+        self.assertEqual(live["source"], "live")
+        self.assertEqual([f["path"] for f in live["files"]], ["src/app.js"])
 
     def test_a_child_that_dies_leaves_the_session_done(self):
         self.post("/api/message", {"session_id": "sess-1", "text": "DIE"})

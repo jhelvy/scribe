@@ -266,6 +266,17 @@ image (it sees the picture); anything else, and everything on a terminal
 session, is named by path so Claude reads it with its own tools. `uploads.max_mb`
 caps the size.
 
+**Slash commands and `@` files.** Typing `/` at the start of the box lists
+what this session can run: your skills (`~/.claude/skills`), your commands,
+the project's own under `.claude/`, every enabled plugin's, and, once a
+page-driven session has started, the bundled skills and built-in commands
+Claude Code itself reported (kept for later, so they show on other sessions
+too). Entries a channel cannot carry are greyed with the reason: a built-in
+like `/compact` only works at Claude Code's own prompt, so it is refused on a
+terminal session rather than sent as prose. `@` lists files under the
+session's folder (from the driver when there is one, else `git ls-files`).
+↑↓ move, Tab or Enter completes, Esc closes.
+
 **Mode and model.** On a page-driven session the two chips under the compose
 box switch the permission mode (`Shift+Tab` cycles, like the terminal) and the
 model; on a terminal session they show what the transcript says and point you

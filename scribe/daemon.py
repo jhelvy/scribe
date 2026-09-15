@@ -37,6 +37,7 @@ from urllib.parse import parse_qs, urlparse
 from . import (
     archive,
     build,
+    catalog,
     config,
     control,
     driver,
@@ -688,6 +689,7 @@ class Hub:
             return old
         self.broadcast(session_id, "delivery", {"status": "starting", "via": "driver"})
         drv.start()
+        catalog.remember(drv.caps.as_dict())
         with self._lock:
             self.drivers[session_id] = drv
             self.ended.discard(session_id)
@@ -756,6 +758,8 @@ class Hub:
 
     def _on_driver_event(self, drv: driver.Driver, kind: str, data: dict) -> None:
         sid = drv.session_id
+        if kind == "init":
+            catalog.remember(drv.caps.as_dict())
         if kind == "exit":
             with self._lock:
                 if self.drivers.get(sid) is drv:
@@ -1182,6 +1186,35 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(snap)
         if route == "/api/stream":
             return self._stream((params.get("id") or [""])[0])
+        if route == "/api/commands":
+            session_id = (params.get("session_id") or [""])[0]
+            ref = self.hub.ref_for(session_id) if session_id else None
+            via = self.hub.reply_via(ref, self.hub.is_live(ref)) if ref else "spawn"
+            cwd = ref.cwd if ref else (params.get("cwd") or [""])[0]
+            drv = self.hub.driver_for(session_id) if session_id else None
+            live = drv.caps.as_dict() if drv is not None else None
+            entries, source = catalog.catalogue(cwd, live)
+            for entry in entries:
+                ok, why = catalog.available(entry, via)
+                entry["available"] = ok
+                entry["why"] = why
+            return self._json({"commands": entries, "source": source, "channel": via})
+
+        if route == "/api/files":
+            session_id = (params.get("session_id") or [""])[0]
+            query = (params.get("q") or [""])[0][:200]
+            ref = self.hub.ref_for(session_id) if session_id else None
+            cwd = ref.cwd if ref else (params.get("cwd") or [""])[0]
+            drv = self.hub.driver_for(session_id) if session_id else None
+            if drv is not None:
+                try:
+                    found = drv.file_suggestions(query)
+                    if found:
+                        return self._json({"files": found[:30], "source": "live"})
+                except driver.DriverError:
+                    pass
+            return self._json({"files": catalog.list_files(cwd, query), "source": "disk"})
+
         if route == "/api/config":
             return self._json(self.hub.cfg)
         if route == "/api/search":

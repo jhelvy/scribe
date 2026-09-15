@@ -49,6 +49,10 @@
     attachments: [],    // {id, name, mime, image, url, pending}
     compose: { mode: "", model: "" },  // picks for a session that has no process yet
     popover: null,
+    commands: null,     // the slash catalogue for the current session
+    commandsKey: "",
+    fileSeq: 0,
+    fileTimer: null,
   };
 
   /* ----------------------------------------------------------------- utils */
@@ -971,6 +975,7 @@
     closePopover();
     clearAttachments();
     state.compose = { mode: "", model: "" };
+    state.commands = null;
     state.sessionId = id;
     location.hash = "#/s/" + id;
     resetView();
@@ -1781,6 +1786,112 @@
     });
   }
 
+
+  // -- `/` commands and `@` files ---------------------------------------------
+
+  // The catalogue is the daemon's (`/api/commands`): disk plus whatever a
+  // driver reported. Cached per session and per "live or not", because a
+  // driver starting mid-session changes what is on offer.
+  function loadCommands() {
+    var key = state.sessionId + ":" + ((state.head.caps || {}).commands || "");
+    if (state.commands && state.commandsKey === key) return Promise.resolve(state.commands);
+    return api("/api/commands?session_id=" + encodeURIComponent(state.sessionId || "")).then(function (r) {
+      if (r.error) return [];
+      state.commands = r.commands || [];
+      state.commandsKey = key;
+      return state.commands;
+    });
+  }
+
+  function currentToken(kind) {
+    var input = $("compose-input");
+    return kind === "slash"
+      ? Compose.slashToken(input.value, input.selectionStart)
+      : Compose.mentionToken(input.value, input.selectionStart);
+  }
+
+  function suggest() {
+    if (state.popover && state.popover.opts.cls === "menu") return;
+    var slash = currentToken("slash");
+    if (slash) return suggestCommands(slash);
+    var mention = currentToken("mention");
+    if (mention) return suggestFiles(mention);
+    if (state.popover && state.popover.opts.cls === "complete") closePopover();
+  }
+
+  function showComplete(kind, items, empty) {
+    var pop = state.popover;
+    if (pop && pop.opts.cls === "complete" && pop.opts.kind === kind) {
+      pop.update(items);
+      return;
+    }
+    openPopover({
+      anchor: $("compose"),
+      cls: "complete",
+      kind: kind,
+      items: items,
+      empty: empty,
+      onPick: function (item) { completeWith(kind, item.insert); },
+    });
+  }
+
+  function completeWith(kind, insert) {
+    var input = $("compose-input");
+    var token = currentToken(kind);
+    if (!token) return;
+    var out = Compose.complete(input.value, token, insert);
+    input.value = out.text;
+    input.setSelectionRange(out.caret, out.caret);
+    autogrow(input);
+    saveDraft(input.value);
+    input.focus();
+  }
+
+  var SCOPE_TAG = { project: "project", user: "yours", plugin: "plugin" };
+
+  function suggestCommands(token) {
+    loadCommands().then(function (list) {
+      if (!currentToken("slash")) return;
+      var ranked = Compose.rank(token.query, list, "name").slice(0, 40);
+      var items = ranked.map(function (c) {
+        return {
+          label: "/" + c.name,
+          hint: c.argument_hint,
+          detail: c.description,
+          tag: c.scope === "claude" ? (c.kind === "builtin" ? "built-in" : "bundled") : SCOPE_TAG[c.scope] || c.scope,
+          disabled: !c.available,
+          why: c.why,
+          insert: "/" + c.name,
+        };
+      });
+      showComplete("slash", items, "no command matches");
+    });
+  }
+
+  function suggestFiles(token) {
+    clearTimeout(state.fileTimer);
+    var seq = ++state.fileSeq;
+    state.fileTimer = setTimeout(function () {
+      api("/api/files?session_id=" + encodeURIComponent(state.sessionId || "") + "&q=" + encodeURIComponent(token.query)).then(function (r) {
+        if (seq !== state.fileSeq || !currentToken("mention")) return;
+        var items = (r.files || []).map(function (f) {
+          return { label: "@" + f.path, insert: "@" + f.path };
+        });
+        showComplete("mention", items, "no file matches");
+      });
+    }, 120);
+  }
+
+  // A command the channel cannot carry is stopped here, with the reason,
+  // rather than sent to a session that would read it as prose.
+  function commandBlocked(text) {
+    var token = Compose.slashToken(text, null);
+    if (!token || !state.commands) return "";
+    var entry = state.commands.find(function (c) { return c.name === token.query; });
+    if (entry && !entry.available) return "/" + entry.name + ": " + entry.why;
+    return "";
+  }
+
   function bindComposer() {
     $("attach-btn").addEventListener("click", function () { $("file-input").click(); });
     $("file-input").addEventListener("change", function (ev) {
@@ -1924,7 +2035,12 @@
     $("compose-input").addEventListener("input", function (ev) {
       autogrow(ev.target);
       saveDraft(ev.target.value);
+      suggest();
     });
+    $("compose-input").addEventListener("keyup", function (ev) {
+      if (/^(ArrowLeft|ArrowRight|Home|End)$/.test(ev.key)) suggest();
+    });
+    $("compose-input").addEventListener("click", suggest);
 
     // Clicking anywhere in a round focuses it and centres it — the behaviour
     // asked for explicitly, extended so a tool call also lights up its note.
@@ -1977,6 +2093,8 @@
     var ready = state.attachments.filter(function (a) { return a.id; });
     if ((!text && !ready.length) || $("compose").dataset.sending === "true") return;
     if (state.attachments.some(function (a) { return a.pending; })) return toast("still uploading…");
+    var blocked = commandBlocked(text);
+    if (blocked) return toast(blocked);
     var body = { session_id: state.sessionId, text: text, attachments: ready.map(function (a) { return a.id; }) };
     if (state.head.reply_via === "spawn") {
       if (state.compose.mode) body.mode = state.compose.mode;
