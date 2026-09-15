@@ -167,6 +167,54 @@
 
   /* ---------------------------------------------------------------- render */
 
+  function fmtBytes(n) {
+    n = Number(n) || 0;
+    if (!n) return "";
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+    if (n >= 1024) return Math.round(n / 1024) + " KB";
+    return n + " B";
+  }
+
+  function attachmentUrl(a) {
+    if (a.path) return "/api/file?path=" + encodeURIComponent(a.path);
+    return "/api/blob?session_id=" + encodeURIComponent(state.sessionId || "") + "&uuid=" + encodeURIComponent(a.uuid || "") + "&i=" + (a.index || 0);
+  }
+
+  // Pictures show as pictures and files as cards; both open in a new tab.
+  // Built as DOM, never through marked, so nothing here is markup.
+  function renderAttached(payload) {
+    var wrap = el("div", "attached");
+    (payload.attachments || []).forEach(function (a) {
+      var url = attachmentUrl(a);
+      var link = document.createElement("a");
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      if (a.kind === "image") {
+        link.className = "shot";
+        var img = document.createElement("img");
+        img.src = url;
+        img.alt = a.name || "pasted image";
+        img.loading = "lazy";
+        link.appendChild(img);
+        link.title = a.name || "open the image";
+      } else {
+        link.className = "filecard";
+        var ext = ((a.name || "").split(".").pop() || "").toUpperCase();
+        if (ext === (a.name || "").toUpperCase()) ext = "FILE";
+        link.appendChild(el("span", "filecard-ext", ext.slice(0, 5)));
+        var text = el("span", "filecard-text");
+        text.appendChild(el("span", "filecard-name", a.name || "file"));
+        var meta = [a.media_type || "", fmtBytes(a.size)].filter(Boolean).join(" · ");
+        if (meta) text.appendChild(el("span", "filecard-meta", meta));
+        link.appendChild(text);
+        link.title = a.path || "";
+      }
+      wrap.appendChild(link);
+    });
+    return wrap;
+  }
+
   function renderRound(payload) {
     var node = el("article", "round");
     node.dataset.index = payload.index;
@@ -189,7 +237,9 @@
       prompt.appendChild(markdown(payload.prompt));
       node.appendChild(prompt);
     }
-    if (payload.images) {
+    if (payload.attachments && payload.attachments.length) {
+      node.appendChild(renderAttached(payload));
+    } else if (payload.images) {
       node.appendChild(el("div", "notice", "+ " + payload.images + " pasted image" + (payload.images > 1 ? "s" : "")));
     }
 

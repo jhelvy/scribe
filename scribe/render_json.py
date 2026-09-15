@@ -66,6 +66,7 @@ class JsonRenderer:
             "prompt": self.redact(rnd.prompt),
             "source": rnd.source,
             "images": rnd.images,
+            "attachments": [dict(a, path=self.redact(a["path"])) if a.get("path") else dict(a) for a in rnd.attachments],
             "duration_ms": rnd.duration_ms,
             "duration_label": human_duration(rnd.duration_ms),
             "usage": rnd.usage.as_dict(),

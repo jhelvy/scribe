@@ -455,3 +455,37 @@ class TestInboxMessages(Isolated):
         state = build.turn_state(rows)
         self.assertEqual(state["phase"], "working")
         self.assertEqual(state["turn_started"], "2026-07-28T10:00:00.000Z")
+
+
+class TestAttachments(unittest.TestCase):
+    def test_attached_file_lines_become_attachments(self):
+        rows = [user_row("s", "look at this\n\nAttached file: /tmp/up/0123456789ab-notes.txt\nAttached file: /tmp/up/def-shot.png", "2026-07-28T10:00:00Z", "u1")]
+        session = build.build(rows)
+        rnd = session.rounds[0]
+        self.assertEqual(rnd.prompt, "look at this")
+        self.assertEqual([a["kind"] for a in rnd.attachments], ["file", "image"])
+        self.assertEqual(rnd.attachments[0]["name"], "notes.txt")
+        self.assertEqual(rnd.attachments[1]["media_type"], "image/png")
+
+    def test_image_blocks_are_addressed_by_row_and_index(self):
+        row = user_row("s", "", "2026-07-28T10:00:00Z", "u7")
+        row["message"]["content"] = [
+            {"type": "text", "text": "what is this"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"}},
+        ]
+        session = build.build([row])
+        rnd = session.rounds[0]
+        self.assertEqual(rnd.images, 1)
+        self.assertEqual(rnd.attachments, [{"kind": "image", "uuid": "u7", "index": 1, "media_type": "image/jpeg"}])
+
+    def test_a_peer_message_keeps_its_attachments(self):
+        row = user_row("s", "", "2026-07-28T10:00:00Z", "u8", isMeta=True,
+                       origin={"kind": "peer", "name": "scribe", "body": "see\n\nAttached file: /tmp/up/x-a.pdf"})
+        rnd = build.build([row]).rounds[0]
+        self.assertEqual(rnd.source, "web")
+        self.assertEqual(rnd.prompt, "see")
+        self.assertEqual(rnd.attachments[0]["name"], "x-a.pdf")
+
+
+if __name__ == "__main__":
+    unittest.main()

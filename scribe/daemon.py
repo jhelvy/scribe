@@ -20,6 +20,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import mimetypes
 import os
 import queue
 import socket
@@ -942,6 +943,51 @@ class Hub:
 
     # -- attachments ------------------------------------------------------
 
+    def image_block(self, session_id: str, row_uuid: str, index: int) -> tuple[str, bytes] | None:
+        """The bytes of one image block in one transcript row, or None.
+
+        The transcript is scanned for the row rather than kept decoded: a
+        picture is looked at rarely and the browser caches it after that.
+        """
+        if not session_id or not row_uuid or "/" in session_id or "/" in row_uuid:
+            return None
+        path = transcript.find_transcript(session_id)
+        if path is None:
+            return None
+        needle = f'"uuid":"{row_uuid}"'.encode()
+        needle_spaced = f'"uuid": "{row_uuid}"'.encode()
+        try:
+            with open(path, "rb") as fh:
+                for line in fh:
+                    if needle not in line and needle_spaced not in line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if row.get("uuid") != row_uuid:
+                        continue
+                    blocks = build._blocks(row)
+                    if not (0 <= index < len(blocks)):
+                        return None
+                    block = blocks[index]
+                    if not isinstance(block, dict) or block.get("type") != "image":
+                        return None
+                    source = block.get("source") if isinstance(block.get("source"), dict) else {}
+                    if source.get("type") != "base64":
+                        return None
+                    import base64
+
+                    try:
+                        data = base64.b64decode(str(source.get("data") or ""))
+                    except (ValueError, TypeError):
+                        return None
+                    media_type = sniff_image(data) or str(source.get("media_type") or "image/png")
+                    return media_type, data
+        except OSError:
+            return None
+        return None
+
     def save_upload(self, session_id: str, name: str, mime: str, data: bytes) -> dict:
         """Keep a file attached from the page under ~/.scribe/uploads.
 
@@ -1311,6 +1357,42 @@ class Handler(BaseHTTPRequestHandler):
             return self._stream((params.get("id") or [""])[0])
         if route == "/api/new":
             return self._json({"recent": self.hub.recent_cwds(), "caps": self.hub.caps_for(None, "spawn", None, [])})
+
+        if route == "/api/file":
+            # A file attached from the page, by path. Only what lives under
+            # our own uploads directory is served: this is a loopback
+            # daemon, but a path parameter that reads anything is still a
+            # path parameter that reads anything.
+            raw = (params.get("path") or [""])[0]
+            root = os.path.realpath(str(paths.uploads_dir()))
+            target = os.path.realpath(raw)
+            if not raw or not target.startswith(root + os.sep) or not os.path.isfile(target):
+                return self._text("not found", 404)
+            with open(target, "rb") as fh:
+                data = fh.read()
+            ctype = sniff_image(data) or mimetypes.guess_type(target)[0] or "application/octet-stream"
+            if ctype.startswith("text/"):
+                ctype += "; charset=utf-8"
+            name = os.path.basename(target).split("-", 1)[-1]
+            return self._send(200, data, ctype, {
+                "Content-Disposition": f'inline; filename="{name}"',
+                "Cache-Control": "private, max-age=86400",
+            })
+
+        if route == "/api/blob":
+            # A picture that travelled inside the transcript as a content
+            # block: found by row uuid and block index, decoded on demand.
+            session_id = (params.get("session_id") or [""])[0]
+            row_uuid = (params.get("uuid") or [""])[0]
+            try:
+                index = int((params.get("i") or ["0"])[0])
+            except ValueError:
+                index = 0
+            block = self.hub.image_block(session_id, row_uuid, index)
+            if block is None:
+                return self._text("not found", 404)
+            media_type, data = block
+            return self._send(200, data, media_type, {"Cache-Control": "private, max-age=86400"})
 
         if route == "/api/stats":
             span = (params.get("range") or ["all"])[0]

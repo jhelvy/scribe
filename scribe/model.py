@@ -217,6 +217,9 @@ class Round:
     usage_by_model: dict = field(default_factory=dict)  # model -> Usage.total
     duration_ms: int = 0
     images: int = 0
+    # What came with the prompt: pictures pasted or attached (as content
+    # blocks, addressed by row uuid + block index) and files named by path.
+    attachments: list = field(default_factory=list)
 
     @property
     def tool_calls(self) -> list:
@@ -234,6 +237,7 @@ class Round:
             "usage": self.usage.as_dict(),
             "duration_ms": self.duration_ms,
             "images": self.images,
+            "attachments": list(self.attachments),
             "tool_count": len(self.tool_calls),
         }
 

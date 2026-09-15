@@ -264,7 +264,9 @@ attaches files; they are kept under `~/.scribe/uploads/<session>/` and never
 enter a repository. On a page-driven session an image goes to Claude as an
 image (it sees the picture); anything else, and everything on a terminal
 session, is named by path so Claude reads it with its own tools. `uploads.max_mb`
-caps the size.
+caps the size. In the conversation an attached picture shows as the picture
+and any other file as a card with its name, type and size; either opens in a
+new tab. Screenshots pasted in the terminal show the same way.
 
 **The home page.** `#/` (the brand name, or `h`) is what the desktop app's
 landing page is, over every session on the machine instead of the few the

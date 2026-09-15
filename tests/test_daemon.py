@@ -867,6 +867,30 @@ class TestDriverDelivery(DaemonHarness):
         self.assertIn(str(paths.uploads_dir(sid)), turn["text"])
         self.assertTrue(os.path.exists(turn["text"].split("Attached file: ")[1]))
 
+    def test_attachments_are_served_back_and_confined(self):
+        saved = self.upload("shot.png", self.PNG, "image/png")
+        url = f"http://127.0.0.1:{self.port}/api/file?path=" + urllib.parse.quote(saved["path"])
+        with urllib.request.urlopen(url, timeout=5) as r:
+            self.assertEqual(r.headers.get("Content-Type"), "image/png")
+            self.assertEqual(r.read(), self.PNG)
+        outside = self.tmp / "secret.txt"
+        outside.write_text("no")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/file?path=" + urllib.parse.quote(str(outside)), timeout=5)
+        self.assertEqual(caught.exception.code, 404)
+        # A picture that went to the driver as a block comes back from the transcript.
+        self.post("/api/message", {"session_id": "sess-1", "text": "see", "attachments": [saved["id"]]})
+        self.assertTrue(self.wait_idle())
+        snap = self.get("/api/session?id=sess-1")
+        rnd = snap["rounds"][-1]
+        self.assertEqual(rnd["prompt"], "see")
+        self.assertEqual(rnd["attachments"][0]["kind"], "image")
+        blob = f"http://127.0.0.1:{self.port}/api/blob?session_id=sess-1&uuid={rnd['attachments'][0]['uuid']}&i={rnd['attachments'][0]['index']}"
+        with urllib.request.urlopen(blob, timeout=5) as r:
+            self.assertEqual(r.read(), self.PNG)
+        with self.assertRaises(urllib.error.HTTPError):
+            urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/blob?session_id=sess-1&uuid=nope&i=0", timeout=5)
+
     def test_a_child_that_dies_leaves_the_session_done(self):
         self.post("/api/message", {"session_id": "sess-1", "text": "DIE"})
         self.assertTrue(self.wait_for(lambda: self.hub.driver_for("sess-1") is None))

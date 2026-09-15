@@ -62,6 +62,43 @@ RE_PEER_ENVELOPE = re.compile(r"\A<cross-session-message(?: [^>]*)?>\n(.*)\n</cr
 #: ``origin.name`` on a message the scribe page sent (see ``peer.SENDER_NAME``).
 PAGE_SENDER = "scribe"
 
+#: A file the page attached to a message that travelled by path (the inbox
+#: channel carries text only). The line is the daemon's, so its shape is ours.
+RE_ATTACHED = re.compile(r"^Attached file: (\S.*?)\s*$", re.M)
+IMAGE_EXT = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def attachments_of(prompt: str, blocks: list, row_uuid: str) -> tuple[str, list[dict]]:
+    """Split what came with a prompt from the prompt itself.
+
+    Returns the prompt without its ``Attached file:`` lines, and one entry per
+    attachment: ``{"kind": "image", "uuid", "index", "media_type"}`` for a
+    picture carried as a content block, ``{"kind": "image"|"file", "path",
+    "name", "media_type", "size"}`` for a file named by path. The size is the
+    one impure read in the builder: a card that says how big a file is beats
+    a round trip, and a missing file simply has no size.
+    """
+    found: list[dict] = []
+    for i, block in enumerate(blocks):
+        if isinstance(block, dict) and block.get("type") == "image":
+            source = block.get("source") if isinstance(block.get("source"), dict) else {}
+            found.append({"kind": "image", "uuid": row_uuid, "index": i, "media_type": str(source.get("media_type") or "image/png")})
+    for match in RE_ATTACHED.finditer(prompt or ""):
+        path = match.group(1)
+        name = os.path.basename(path)
+        # Uploads are stored as <id>-<name>; the id is ours, not the file's.
+        name = re.sub(r"^[0-9a-f]{12}-", "", name)
+        ext = os.path.splitext(name)[1].lower()
+        entry = {"kind": "image" if ext in IMAGE_EXT else "file", "path": path, "name": name, "media_type": IMAGE_EXT.get(ext, ""), "size": 0}
+        try:
+            entry["size"] = os.path.getsize(path)
+        except OSError:
+            pass
+        found.append(entry)
+    if found and prompt:
+        prompt = RE_ATTACHED.sub("", prompt).strip()
+    return prompt, found
+
 
 # ---------------------------------------------------------------- text helpers
 
@@ -587,8 +624,10 @@ def _handle_user(builder: _RoundBuilder, row: dict, ts: str, cwd: str) -> None:
     peer = peer_message(row)
     if peer is not None:
         text, source = peer
-        if text:
-            builder.open_round(ts, row.get("uuid") or "", text, source=source)
+        text, attached = attachments_of(text, [], row.get("uuid") or "")
+        if text or attached:
+            rnd = builder.open_round(ts, row.get("uuid") or "", text, source=source)
+            rnd.attachments = attached
         return
 
     if row.get("isMeta"):
@@ -599,13 +638,15 @@ def _handle_user(builder: _RoundBuilder, row: dict, ts: str, cwd: str) -> None:
         b.get("text") or "" for b in blocks if isinstance(b, dict) and b.get("type") == "text"
     )
     prompt, commands, outputs = strip_wrappers(raw)
+    prompt, attached = attachments_of(prompt, blocks, row.get("uuid") or "")
 
-    if not prompt and not commands and not outputs and not images:
+    if not prompt and not commands and not outputs and not images and not attached:
         return
 
-    if prompt or images:
+    if prompt or images or attached:
         rnd = builder.open_round(ts, row.get("uuid") or "", prompt, source="user")
         rnd.images = images
+        rnd.attachments = attached
         for command in commands:
             rnd.items.append(Notice(ts=ts, text=f"/{command.lstrip('/')}", variant="command"))
         for out in outputs:

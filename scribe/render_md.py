@@ -234,6 +234,11 @@ class MarkdownRenderer:
         if rnd.images:
             out.append(f"*+ {rnd.images} pasted image{'s' if rnd.images != 1 else ''}*")
             out.append("")
+        files = [a for a in rnd.attachments if a.get("path")]
+        if files:
+            for a in files:
+                out.append(f"*attached:* [{a['name']}]({self.redact(a['path'])})")
+            out.append("")
 
         body = self._items(rnd.items, session, level)
         if body:
