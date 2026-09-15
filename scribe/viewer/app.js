@@ -52,6 +52,7 @@
     commands: null,     // the slash catalogue for the current session
     commandsKey: "",
     newCwd: "",         // the folder picked on the home view
+    stamp: "",          // the daemon's viewer-files hash, from the SSE hello
     stats: null,
     statsRange: "all",
     statsTab: "overview",
@@ -1522,6 +1523,15 @@
     es.addEventListener("open", function () {
       state.reconnect = 0;
       $("conn-dot").dataset.state = "live";
+    });
+    // The daemon stamps its viewer files. A different stamp after a
+    // reconnect means it was restarted on new code: reload rather than run
+    // this script against payloads it does not understand.
+    es.addEventListener("hello", function (ev) {
+      var stamp = (JSON.parse(ev.data) || {}).stamp || "";
+      if (!stamp) return;
+      if (state.stamp && state.stamp !== stamp) { location.reload(); return; }
+      state.stamp = stamp;
     });
     es.addEventListener("error", function () {
       $("conn-dot").dataset.state = "lost";

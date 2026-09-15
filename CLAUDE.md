@@ -294,6 +294,13 @@ transcript on the machine.
 
 ## Viewer state
 
+**A restarted daemon reloads the page.** The SSE `hello` frame carries
+`asset_stamp()`, a hash of the viewer files computed once per process. The
+page keeps the first stamp it sees and reloads when a reconnect brings a
+different one, so a restart on new code never leaves yesterday's script
+reading today's payloads.
+
+
 Every round and item carries a server-assigned `key` (`_key_round` in
 `daemon.py`; tool calls key on their id, everything else on position — safe
 because transcripts are append-only). An update replaces only the nodes whose

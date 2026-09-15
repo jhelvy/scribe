@@ -78,6 +78,28 @@ _IMAGE_MAGIC = (
 )
 
 
+_ASSET_STAMP = ""
+
+
+def asset_stamp() -> str:
+    """A hash of the viewer's files, computed once per daemon process.
+
+    The page compares it across reconnects: a different stamp means the
+    daemon was restarted on new code, and the page reloads itself rather
+    than running yesterday's script against today's payloads.
+    """
+    global _ASSET_STAMP
+    if not _ASSET_STAMP:
+        h = hashlib.blake2b(digest_size=8)
+        for name in ("index.html", "app.js", "compose.js", "rail.js", "styles.css", "theme-boot.js"):
+            try:
+                h.update((VIEWER_DIR / name).read_bytes())
+            except OSError:
+                pass
+        _ASSET_STAMP = h.hexdigest()
+    return _ASSET_STAMP
+
+
 def sniff_image(data: bytes) -> str:
     """The image type by its first bytes, or "". The browser's claim is not
     trusted for the one decision that matters: whether the model sees it."""
@@ -1663,7 +1685,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
         try:
-            self._frame("hello", {"session_id": session_id, "ok": True})
+            self._frame("hello", {"session_id": session_id, "ok": True, "stamp": asset_stamp()})
             last_ping = time.time()
             while sub.alive:
                 try:

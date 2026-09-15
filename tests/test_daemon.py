@@ -157,6 +157,17 @@ class TestHttpApi(DaemonHarness):
         self.assertIn("pytest -q", text)
 
 
+class TestAssetStamp(DaemonHarness):
+    def test_hello_carries_a_stable_stamp(self):
+        stamp = daemon.asset_stamp()
+        self.assertEqual(len(stamp), 16)
+        self.assertEqual(daemon.asset_stamp(), stamp)
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/stream?id=", timeout=5) as r:
+            first = r.readline().decode() + r.readline().decode()
+        self.assertIn("event: hello", first)
+        self.assertIn(stamp, first)
+
+
 class TestWatcher(DaemonHarness):
     def test_new_rows_produce_changed_rounds_only(self):
         path = self.transcript_path(session_id="sess-1")
