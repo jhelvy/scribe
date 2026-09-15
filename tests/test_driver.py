@@ -90,6 +90,14 @@ class DriverHarness(Isolated):
             time.sleep(0.02)
         return False
 
+    def wait_for(self, pred, timeout=5.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return True
+            time.sleep(0.02)
+        return False
+
     def wait_state(self, drv, state, timeout=5.0):
         end = time.time() + timeout
         while time.time() < end:
@@ -229,7 +237,8 @@ class TestLifecycle(DriverHarness):
         drv = self.make().start()
         self.assertEqual(drv.set_mode("plan"), "plan")
         self.assertEqual(drv.caps.mode, "plan")
-        self.assertIn(("mode", {"mode": "plan"}), self.events)
+        # The status frame follows the answer; give the reader a moment.
+        self.assertTrue(self.wait_for(lambda: ("mode", {"mode": "plan"}) in self.events))
         with self.assertRaises(driver.DriverError):
             drv.set_mode("nonsense")
         drv.set_model("haiku")
