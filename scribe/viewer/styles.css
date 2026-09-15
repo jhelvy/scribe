@@ -195,6 +195,7 @@ body {
   overflow: hidden;
 }
 
+.brand .btn { white-space: nowrap; }
 .brand {
   display: flex;
   align-items: baseline;
@@ -1407,3 +1408,49 @@ body[data-view="board"] #log-link { display: none !important; }
 /* completion lists are wider than menus: a command name plus its description */
 .popover.complete { width: min(36rem, calc(100vw - 1rem)); max-height: 22rem; }
 .popover.complete .popover-item { padding: 0.3rem 0.5rem; }
+
+/* ------------------------------------------------------------ new session */
+
+.newpanel { max-width: var(--measure); margin: 3rem auto 1rem; padding: 0 1rem; }
+.newpanel h2 { font-family: var(--serif); font-weight: 500; font-size: 1.5rem; margin: 0 0 0.4rem; color: var(--ink); }
+.newpanel .lede { font-family: var(--serif); color: var(--ink-2); margin: 0 0 1.5rem; }
+.cwd-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  background: var(--paper-2);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+.cwd-field:focus-within { border-color: color-mix(in oklch, var(--ember) 45%, var(--rule)); }
+.cwd-field .label { color: var(--ink-3); font-size: 0.625rem; letter-spacing: 0.05em; text-transform: uppercase; }
+.cwd-field input { flex: 1; border: 0; background: transparent; outline: 0; font: inherit; color: var(--ink); min-width: 0; }
+.cwd-status { font-size: 0.625rem; color: var(--ink-3); white-space: nowrap; }
+.cwd-status[data-ok="true"] { color: var(--add); }
+.cwd-status[data-ok="false"] { color: var(--danger); }
+.recent { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.6rem; }
+.recent-cwd {
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  cursor: pointer;
+}
+.recent-cwd:hover { background: var(--paper-3); color: var(--ink); }
+.project-name .pnew {
+  margin-left: 0.3rem;
+  padding: 0 0.3rem;
+  border-radius: 2px;
+  color: var(--ink-3);
+  opacity: 0;
+  transition: opacity 120ms var(--ease);
+}
+.project-name:hover .pnew { opacity: 1; }
+.project-name .pnew:hover { background: var(--paper-3); color: var(--ink); }
+body[data-view="new"] .rail { display: none; }

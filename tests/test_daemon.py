@@ -825,6 +825,48 @@ class TestDriverDelivery(DaemonHarness):
         self.assertEqual(live["source"], "live")
         self.assertEqual([f["path"] for f in live["files"]], ["src/app.js"])
 
+    def test_a_new_session_starts_with_a_fresh_id_and_becomes_real(self):
+        info = self.get("/api/new")
+        self.assertEqual([r["cwd"] for r in info["recent"]], [str(self.cwd)])
+        self.assertTrue(info["caps"]["mode"]["settable"])
+        self.assertEqual(self.get("/api/fs?path=" + str(self.cwd))["ok"], True)
+        self.assertEqual(self.get("/api/fs?path=/nowhere/at/all")["ok"], False)
+        self.assertIn("error", self.post("/api/new", {"cwd": "/nowhere", "text": "hi"}))
+        self.assertIn("error", self.post("/api/new", {"cwd": str(self.cwd), "text": ""}))
+
+        reply = self.post("/api/new", {"cwd": str(self.cwd), "text": "first words", "mode": "plan"})
+        self.assertTrue(reply["ok"], reply)
+        sid = reply["id"]
+        self.assertNotEqual(sid, "sess-1")
+        started = self.fake_log_rows("start")[0]
+        argv = started["argv"]
+        self.assertEqual(argv[argv.index("--session-id") + 1], sid)
+        self.assertNotIn("--resume", argv)
+        self.assertEqual(started["cwd"], str(self.cwd))
+        # A draft card and snapshot exist before (or regardless of) the file.
+        cards = {c["id"]: c for c in self.get("/api/sessions")["sessions"]}
+        self.assertIn(sid, cards)
+        snap = self.get("/api/session?id=" + sid)
+        self.assertEqual(snap["head"]["reply_via"], "driver")
+        self.assertTrue(self.wait_idle(sid))
+        self.assertTrue(self.wait_for(lambda: not self.get("/api/session?id=" + sid).get("draft")))
+        snap = self.get("/api/session?id=" + sid)
+        self.assertEqual(snap["rounds"][0]["prompt"], "first words")
+        card = {c["id"]: c for c in self.get("/api/sessions")["sessions"]}[sid]
+        self.assertFalse(card.get("draft"))
+        self.assertEqual(card["reply_via"], "driver")
+        self.assertNotIn(sid, self.hub.drafts)
+
+    def test_uploads_made_before_the_session_existed_move_with_it(self):
+        saved = self.upload("notes.txt", b"hello", "text/plain", session_id="new")
+        self.assertTrue(saved["path"].startswith(str(paths.uploads_dir("new"))))
+        reply = self.post("/api/new", {"cwd": str(self.cwd), "text": "read", "attachments": [saved["id"]]})
+        sid = reply["id"]
+        self.assertTrue(self.wait_idle(sid))
+        turn = self.fake_log_rows("user")[0]
+        self.assertIn(str(paths.uploads_dir(sid)), turn["text"])
+        self.assertTrue(os.path.exists(turn["text"].split("Attached file: ")[1]))
+
     def test_a_child_that_dies_leaves_the_session_done(self):
         self.post("/api/message", {"session_id": "sess-1", "text": "DIE"})
         self.assertTrue(self.wait_for(lambda: self.hub.driver_for("sess-1") is None))

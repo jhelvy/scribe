@@ -51,6 +51,8 @@
     popover: null,
     commands: null,     // the slash catalogue for the current session
     commandsKey: "",
+    newCwd: "",         // the folder picked on the new-session view
+    draft: false,       // the open session has no transcript yet
     fileSeq: 0,
     fileTimer: null,
   };
@@ -929,6 +931,18 @@
         header.appendChild(el("span", "live-dot"));
       }
       header.appendChild(el("span", "pcount", String(sessions.length)));
+      var here = sessions.find(function (s) { return s.cwd; });
+      if (here) {
+        var plus = el("span", "pnew", "+");
+        plus.title = "new session in " + here.cwd;
+        plus.setAttribute("role", "button");
+        plus.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          showNew(here.cwd);
+          $("sidebar").dataset.open = "false";
+        });
+        header.appendChild(plus);
+      }
       header.addEventListener("click", function () {
         var next = group.dataset.open !== "true";
         group.dataset.open = String(next);
@@ -970,12 +984,16 @@
 
   function selectSession(id) {
     if (!id) return;
-    if (id === state.sessionId && state.view !== "board") return;
+    if (id === state.sessionId && state.view === "session") return;
     leaveBoard();
     closePopover();
     clearAttachments();
     state.compose = { mode: "", model: "" };
     state.commands = null;
+    state.draft = false;
+    state.view = "session";
+    document.body.dataset.view = "session";
+    $("arm-toggle").hidden = false;
     state.sessionId = id;
     location.hash = "#/s/" + id;
     resetView();
@@ -1335,6 +1353,15 @@
       state.head = data.head || {};
       applyHead();
       restoreDraft();
+      if (data.draft) {
+        // Claude has not written the transcript yet. The `sessions` event
+        // says when it has; `load` runs again then.
+        state.draft = true;
+        notice([{ b: "Starting Claude…" }, { br: 1 }, { t: "The conversation appears here as soon as the first turn is written." }]);
+        openStream(id);
+        return;
+      }
+      state.draft = false;
       (data.pending || []).forEach(function (p) { state.pending.set(p.call_id, p); });
       applyRounds(data.rounds || [], []);
       requestAnimationFrame(function () {
@@ -1473,6 +1500,10 @@
       state.sessions = JSON.parse(ev.data);
       renderSidebar();
       renderBoard();
+      if (state.draft && state.sessionId) {
+        var mine = state.sessions.find(function (s) { return s.id === state.sessionId; });
+        if (mine && !mine.draft) load(state.sessionId);
+      }
     });
     es.addEventListener("card", function (ev) {
       mergeCard(JSON.parse(ev.data));
@@ -1926,6 +1957,120 @@
     });
   }
 
+
+  /* ------------------------------------------------------------- new session */
+
+  // The "what's up next" view: pick a folder, write the first message, and a
+  // driver starts a fresh session there. Until Claude writes the transcript
+  // the session is a draft card; the daemon swaps in the real one.
+  function showNew(cwd) {
+    leaveBoard();
+    closePopover();
+    clearAttachments();
+    state.view = "new";
+    document.body.dataset.view = "new";
+    state.sessionId = null;
+    state.draft = false;
+    state.commands = null;
+    state.compose = { mode: "", model: "" };
+    state.newCwd = cwd || state.newCwd || "";
+    if (location.hash !== "#/new") location.hash = "#/new";
+    document.title = "new session · scribe";
+    $("session-title").textContent = "new session";
+    clear($("session-facts"));
+    $("arm-toggle").hidden = true;
+    openStream("");
+    resetView();
+
+    var column = $("column");
+    clear(column);
+    clear($("rail-inner"));
+    clear($("tethers"));
+    var panel = el("div", "newpanel");
+    panel.appendChild(el("h2", null, "What's up next?"));
+    panel.appendChild(el("p", "lede", "Pick a folder, write the first message, and Claude starts there. The session lands in the list on the left like any other."));
+    var field = el("label", "cwd-field");
+    field.appendChild(el("span", "label", "start in"));
+    var input = document.createElement("input");
+    input.id = "new-cwd";
+    input.type = "text";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.placeholder = "~/Documents/GitHub/…";
+    input.value = state.newCwd;
+    input.setAttribute("list", "recent-cwds");
+    field.appendChild(input);
+    var status = el("span", "cwd-status");
+    field.appendChild(status);
+    panel.appendChild(field);
+    var list = document.createElement("datalist");
+    list.id = "recent-cwds";
+    panel.appendChild(list);
+    var recent = el("div", "recent");
+    panel.appendChild(recent);
+    column.appendChild(panel);
+
+    function check() {
+      var value = input.value.trim();
+      state.newCwd = value;
+      status.textContent = "";
+      status.dataset.ok = "";
+      if (!value) return;
+      api("/api/fs?path=" + encodeURIComponent(value)).then(function (r) {
+        if (input.value.trim() !== value) return;
+        status.dataset.ok = r.ok ? "true" : "false";
+        status.textContent = r.ok ? "✓" : "not a folder";
+      });
+    }
+    input.addEventListener("input", check);
+    input.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") { ev.preventDefault(); focusComposer(); }
+    });
+
+    api("/api/new").then(function (r) {
+      if (r.error) return;
+      state.head = { id: null, title: "New session", reply_via: "spawn", caps: r.caps || {}, queued: [] };
+      applyDock(state.head);
+      $("compose-input").placeholder = "describe a task or ask a question…";
+      (r.recent || []).forEach(function (item) {
+        var opt = document.createElement("option");
+        opt.value = item.cwd;
+        list.appendChild(opt);
+        var chip = el("button", "recent-cwd", item.project);
+        chip.type = "button";
+        chip.title = item.cwd;
+        chip.addEventListener("click", function () {
+          input.value = item.cwd;
+          check();
+          focusComposer();
+        });
+        recent.appendChild(chip);
+      });
+      if (!input.value && r.recent && r.recent.length) {
+        input.value = r.recent[0].cwd;
+      }
+      check();
+      if (input.value) focusComposer();
+      else input.focus();
+    });
+    renderSidebar();
+  }
+
+  function startNew(text, attachments) {
+    var cwd = ($("new-cwd") ? $("new-cwd").value : state.newCwd).trim();
+    if (!cwd) { toast("pick a folder first"); if ($("new-cwd")) $("new-cwd").focus(); return Promise.resolve({ error: null }); }
+    var body = { cwd: cwd, text: text, attachments: attachments };
+    if (state.compose.mode) body.mode = state.compose.mode;
+    if (state.compose.model) body.model = state.compose.model;
+    return api("/api/new", body).then(function (r) {
+      if (r.error) return r;
+      state.view = "session";
+      document.body.dataset.view = "session";
+      selectSession(r.id);
+      return r;
+    });
+  }
+
   /* --------------------------------------------------------------- controls */
 
   function bind() {
@@ -1941,6 +2086,10 @@
     });
 
     $("theme-toggle").addEventListener("click", toggleTheme);
+    $("new-toggle").addEventListener("click", function () {
+      showNew();
+      $("sidebar").dataset.open = "false";
+    });
     $("board-toggle").addEventListener("click", function () {
       toggleBoard();
       $("sidebar").dataset.open = "false";
@@ -2103,7 +2252,10 @@
     // The text stays in the box until the daemon has it, so a refused or
     // failed send costs nothing but a toast.
     setSending(true);
-    api("/api/message", body).then(function (r) {
+    var request = state.view === "new"
+      ? startNew(text, body.attachments)
+      : api("/api/message", body);
+    request.then(function (r) {
       setSending(false);
       if (r.error) { input.focus(); return toast(r.error); }
       input.value = "";
@@ -2152,6 +2304,8 @@
       toggleTheme();
     } else if (ev.key === "b") {
       toggleBoard();
+    } else if (ev.key === "n") {
+      showNew();
     } else if (ev.key === ".") {
       state.following = true;
       scrollToBottom();
@@ -2181,6 +2335,7 @@
 
   function fromHash() {
     if (location.hash === "#/board") return showBoard();
+    if (location.hash === "#/new") return state.view === "new" ? undefined : showNew();
     var match = /^#\/s\/([\w-]+)$/.exec(location.hash || "");
     if (match && (match[1] !== state.sessionId || state.view === "board")) selectSession(match[1]);
   }
@@ -2247,7 +2402,7 @@
     applyHead();
     applyRounds(snapshot.rounds || [], []);
     document.body.dataset.static = "true";
-    ["arm-toggle", "dock", "board-toggle"].forEach(function (id) { $(id).hidden = true; });
+    ["arm-toggle", "dock", "board-toggle", "new-toggle"].forEach(function (id) { $(id).hidden = true; });
     $("conn-dot").title = "exported file — not live";
     requestAnimationFrame(function () { scheduleRail(true); });
   }
@@ -2262,9 +2417,10 @@
       state.sessions = (data && data.sessions) || [];
       renderSidebar();
       if (location.hash === "#/board") return showBoard();
+      if (location.hash === "#/new") return showNew();
       var match = /^#\/s\/([\w-]+)$/.exec(location.hash || "");
       var wanted = match ? match[1] : state.sessions.length ? state.sessions[0].id : null;
-      if (!wanted) return showEmpty();
+      if (!wanted) return showNew();
       state.sessionId = wanted;
       location.hash = "#/s/" + wanted;
       renderSidebar();

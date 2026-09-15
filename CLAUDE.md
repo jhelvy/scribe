@@ -213,6 +213,14 @@ between turns, closed after `driver.idle_min`. Its docstring records what
   session, `reap_drivers` stops the child once idle and the channel flips to
   `inbox`.
 
+**A session started from the page has no file for a second or two.**
+`Hub.drafts` holds it meanwhile: `index_payload` prepends a draft card and
+`snapshot` answers with a draft head, both flagged `draft`. The page shows
+"starting" and reloads when the `sessions` event carries the id without the
+flag; the draft is dropped the moment the index sees the file. Uploads made
+on the new-session view live under `uploads/new/` and are moved under the id
+by `rehome_uploads` before the first message goes out.
+
 **The slash catalogue has two halves.** Disk (`catalog.scan`: user, project
 and plugin skills/commands, front matter read without YAML) knows scope; only
 a driver's `initialize` answer knows the bundled skills and built-ins, with

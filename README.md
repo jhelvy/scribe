@@ -266,6 +266,12 @@ image (it sees the picture); anything else, and everything on a terminal
 session, is named by path so Claude reads it with its own tools. `uploads.max_mb`
 caps the size.
 
+**A new session.** `+ new` in the sidebar (or `n`, or the `+` on a project
+group) opens a page like the desktop app's: pick a folder, write the first
+message, and a page-driven session starts there under a fresh id. It shows in
+the list at once as a draft and becomes an ordinary session the moment Claude
+writes its transcript.
+
 **Slash commands and `@` files.** Typing `/` at the start of the box lists
 what this session can run: your skills (`~/.claude/skills`), your commands,
 the project's own under `.claude/`, every enabled plugin's, and, once a

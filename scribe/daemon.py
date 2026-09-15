@@ -259,6 +259,9 @@ class Hub:
         self.attention: dict[str, str] = {}  # session_id -> last Notification type
         # Headless children the page is driving, by session (see driver.py).
         self.drivers: dict[str, driver.Driver] = {}
+        # Sessions started from the page whose transcript does not exist yet:
+        # session_id -> {cwd, started}. Dropped as soon as the index sees them.
+        self.drafts: dict[str, dict] = {}
         self._peers: dict[str, peer.Peer] = {}
         self._peers_at = 0.0
         self._card_sig: dict[str, str] = {}
@@ -303,7 +306,122 @@ class Hub:
     def index_payload(self) -> list[dict]:
         with self._lock:
             refs = list(self.index)
-        return [self.card_for(ref) for ref in refs]
+            known = {r.session_id for r in refs}
+            for sid in [d for d in self.drafts if d in known]:
+                self.drafts.pop(sid, None)
+            drafts = list(self.drafts.items())
+        cards = [self.card_for(ref) for ref in refs]
+        for sid, draft in drafts:
+            cards.insert(0, self.draft_card(sid, draft))
+        return cards
+
+    def draft_card(self, sid: str, draft: dict) -> dict:
+        """A card for a session the page started that has no file yet."""
+        drv = self.driver_for(sid)
+        now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(draft.get("started") or time.time()))
+        cwd = draft.get("cwd") or ""
+        running = drv is not None and drv.state == "running"
+        return {
+            "id": sid,
+            "path": "",
+            "cwd": cwd,
+            "project": paths.project_slug(cwd) or cwd,
+            "project_dir": "",
+            "title": draft.get("title") or "New session",
+            "started": now,
+            "updated": now,
+            "size": 0,
+            "mtime": draft.get("started") or time.time(),
+            "git_branch": "",
+            "version": "",
+            "archived": False,
+            "draft": True,
+            "live": drv is not None,
+            "armed": False,
+            "phase": "working" if running else ("your_turn" if drv is not None else "done"),
+            "state": {
+                "phase": "working" if running else "idle",
+                "mode": drv.mode if drv is not None else "",
+                "activity": "starting Claude" if running else "",
+                "activity_kind": "wait" if running else "",
+                "reply": "",
+                "since": now,
+                "turn_started": now if running else "",
+                "tool": "",
+            },
+            "pending": [],
+            "queued": len(drv.queued()) if drv is not None else 0,
+            "reply_via": "driver" if drv is not None else "",
+        }
+
+    def draft_snapshot(self, sid: str) -> dict | None:
+        with self._lock:
+            draft = self.drafts.get(sid)
+        if draft is None:
+            return None
+        card = self.draft_card(sid, draft)
+        drv = self.driver_for(sid)
+        head = dict(card)
+        head.update(
+            {
+                "round_count": 0,
+                "tool_count": 0,
+                "usage_label": "0",
+                "models": [],
+                "queued": drv.queued() if drv is not None else [],
+                "chain": 0,
+                "remote_approval": bool((self.cfg.get("remote_approval") or {}).get("enabled")),
+                "reply_queue": False,
+                "inbox_held": False,
+                "driver": drv.as_dict() if drv is not None else None,
+                "caps": self.caps_for(None, "driver" if drv is not None else "", None, []),
+            }
+        )
+        return {"head": head, "rounds": [], "pending": [], "draft": True}
+
+    def recent_cwds(self, limit: int = 12) -> list[dict]:
+        """Where sessions have run lately, newest first, existing dirs only."""
+        with self._lock:
+            refs = list(self.index)
+        seen: dict[str, dict] = {}
+        for ref in refs:
+            cwd = ref.cwd or ""
+            if not cwd or cwd in seen or not os.path.isdir(cwd):
+                continue
+            seen[cwd] = {"cwd": cwd, "project": paths.project_slug(cwd) or cwd, "updated": ref.updated}
+            if len(seen) >= limit:
+                break
+        return list(seen.values())
+
+    def start_new(self, cwd: str, text: str, ids: list, mode: str = "", model: str = "") -> dict:
+        """Start a session from the page: a fresh id, a driver on it, and the
+        first message. The transcript appears when Claude writes it; until
+        then the session is a draft card."""
+        cwd = os.path.expanduser(cwd or "")
+        if not cwd or not os.path.isdir(cwd):
+            return {"ok": False, "error": f"not a directory: {cwd or '(empty)'}"}
+        cwd = os.path.realpath(cwd)
+        if not (self.cfg.get("driver") or {}).get("enabled", True):
+            return {"ok": False, "error": "the driver is off (scribe config set driver.enabled true)"}
+        sid = str(uuid.uuid4())
+        text, images = self.with_attachments("new", text, ids, as_blocks=True)
+        if not text and not images:
+            return {"ok": False, "error": "empty message"}
+        with self._lock:
+            self.drafts[sid] = {"cwd": cwd, "started": time.time(), "title": ""}
+        try:
+            drv = self.spawn_driver(sid, cwd, resume=False, mode=mode, model=model)
+        except driver.DriverError as exc:
+            with self._lock:
+                self.drafts.pop(sid, None)
+            return {"ok": False, "error": str(exc)}
+        self.rehome_uploads(sid)
+        text = text.replace(str(paths.uploads_dir("new")), str(paths.uploads_dir(sid)))
+        result = drv.send(text, images)
+        if not result.get("ok"):
+            return {"ok": False, "error": result.get("error") or "the driver refused the message"}
+        self.broadcast(None, "sessions", self.index_payload())
+        return {"ok": True, "id": sid, "via": "driver"}
 
     # -- the board ------------------------------------------------------
 
@@ -400,9 +518,10 @@ class Hub:
         """Broadcast a session's card if anything on it changed."""
         with self._lock:
             ref = next((r for r in self.index if r.session_id == session_id), None)
-        if ref is None:
+            draft = self.drafts.get(session_id)
+        if ref is None and draft is None:
             return
-        card = self.card_for(ref)
+        card = self.card_for(ref) if ref is not None else self.draft_card(session_id, draft)
         sig = json.dumps(
             [
                 card["phase"],
@@ -546,6 +665,8 @@ class Hub:
         """What the composer may offer for this session, decided here, not
         guessed on the page. Each channel carries a different subset."""
         drv = self.driver_for(ref.session_id) if ref is not None else None
+        if ref is None and via == "driver":
+            drv = next((d for d in self.drivers.values() if d.alive and d.session_id in self.drafts), None)
         dcfg = self.cfg.get("driver") or {}
         modes = [m for m in driver.MODES if m != "bypassPermissions" or dcfg.get("allow_bypass")]
         mode = (drv.mode if drv is not None else "") or (state or {}).get("mode") or ""
@@ -577,7 +698,7 @@ class Hub:
     def snapshot(self, session_id: str) -> dict | None:
         live = self.get(session_id)
         if live is None:
-            return None
+            return self.draft_snapshot(session_id)
         self.poll_session(live, announce=False)
         return {
             "head": self.head_for(live),
@@ -764,6 +885,8 @@ class Hub:
             with self._lock:
                 if self.drivers.get(sid) is drv:
                     self.drivers.pop(sid, None)
+                if sid in self.drafts and not any(r.session_id == sid for r in self.index):
+                    self.drafts.pop(sid, None)
                 # Without hooks nothing else says the child is gone, and a
                 # fresh mtime would otherwise count as a live process.
                 self.ended.add(sid)
@@ -1186,6 +1309,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(snap)
         if route == "/api/stream":
             return self._stream((params.get("id") or [""])[0])
+        if route == "/api/new":
+            return self._json({"recent": self.hub.recent_cwds(), "caps": self.hub.caps_for(None, "spawn", None, [])})
+
+        if route == "/api/fs":
+            raw = (params.get("path") or [""])[0]
+            path = os.path.expanduser(raw.strip())
+            ok = bool(path) and os.path.isdir(path)
+            return self._json({"ok": ok, "path": os.path.realpath(path) if ok else path, "isdir": ok})
+
         if route == "/api/commands":
             session_id = (params.get("session_id") or [""])[0]
             ref = self.hub.ref_for(session_id) if session_id else None
@@ -1307,6 +1439,16 @@ class Handler(BaseHTTPRequestHandler):
             if not (self.hub.cfg.get("messaging") or {}).get("enabled", True):
                 return self._json({"error": "messaging is disabled (scribe config set messaging.enabled true)"}, 409)
             return self._json({"error": "no way to reach this session: it is running without an inbox"}, 409)
+
+        if route == "/api/new":
+            result = self.hub.start_new(
+                str(data.get("cwd") or ""),
+                str(data.get("text") or "").strip(),
+                [str(x) for x in (data.get("attachments") or []) if x],
+                mode=str(data.get("mode") or ""),
+                model=str(data.get("model") or ""),
+            )
+            return self._json(result, 200 if result.get("ok") else 400)
 
         if route == "/api/unqueue":
             session_id = str(data.get("session_id") or "")
