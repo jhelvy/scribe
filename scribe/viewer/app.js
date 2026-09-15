@@ -233,16 +233,10 @@
     head.appendChild(meta);
     node.appendChild(head);
 
-    if (payload.prompt) {
-      var prompt = el("div", "prompt");
-      prompt.appendChild(markdown(payload.prompt));
-      node.appendChild(prompt);
-    }
-    if (payload.attachments && payload.attachments.length) {
-      node.appendChild(renderAttached(payload));
-    } else if (payload.images) {
-      node.appendChild(el("div", "notice", "+ " + payload.images + " pasted image" + (payload.images > 1 ? "s" : "")));
-    }
+    var ask = el("div", "ask");
+    ask.dataset.ask = "1";
+    node.appendChild(ask);
+    syncAsk(ask, payload);
 
     var body = el("div", "reply");
     body.dataset.body = "1";
@@ -476,7 +470,28 @@
     scheduleRail(true);
   }
 
+  // The prompt and what came with it. Rebuilt only when either changed, so
+  // an update to a round's reply never touches a picture already on screen.
+  function syncAsk(ask, payload) {
+    var sig = JSON.stringify([payload.prompt || "", payload.attachments || [], payload.images || 0]);
+    if (ask.dataset.sig === sig) return;
+    ask.dataset.sig = sig;
+    clear(ask);
+    if (payload.prompt) {
+      var prompt = el("div", "prompt");
+      prompt.appendChild(markdown(payload.prompt));
+      ask.appendChild(prompt);
+    }
+    if (payload.attachments && payload.attachments.length) {
+      ask.appendChild(renderAttached(payload));
+    } else if (payload.images) {
+      ask.appendChild(el("div", "notice", "+ " + payload.images + " pasted image" + (payload.images > 1 ? "s" : "")));
+    }
+  }
+
   function patchRound(node, payload) {
+    var ask = node.querySelector('[data-ask="1"]');
+    if (ask) syncAsk(ask, payload);
     var head = node.querySelector(".round-meta");
     if (head) {
       clear(head);
