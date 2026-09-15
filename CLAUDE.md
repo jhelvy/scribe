@@ -68,14 +68,15 @@ scribe/
   store.py              where a log lives and what goes in it
   daemon.py             HTTP + SSE + watcher + control socket
   control.py            approval holds and the reply queue (no transport)
-  peer.py               messages into a session: the inbox socket, -p --resume
+  peer.py               messages into a session: the inbox socket
+  driver.py             a headless Claude Code child the page drives (stream-json)
   search.py             FTS5 index over every session, incremental
   explain.py            Haiku explainer, content-addressed cache
   install.py            writing hooks into settings.json
   export.py  replay.py
   viewer/              index.html styles.css app.js rail.js theme-boot.js
-                       marked.min.js (vendored, MIT)
-tests/   test_*.py  test_rail.mjs  helpers.py
+                       compose.js (DOM-free composer rules) marked.min.js (vendored, MIT)
+tests/   test_*.py  test_rail.mjs  test_compose.mjs  helpers.py  fake_claude.py
 ```
 
 ## Invariants
@@ -164,10 +165,14 @@ and one from another Claude session as `peer`, with no prose parsing unless
 nothing.
 
 `Hub.reply_via` decides the channel per session and the viewer only shows it:
-`inbox` when the registry has the session, `queue` (Stop hook, opt-in) for a
-live process without one, `resume` when there is no process, `busy` while a
-resume child runs. `is_live` trusts the registry before any hook, so a session
-with an inbox is never "done".
+`driver` when a headless child of ours is behind it, `inbox` when the registry
+has the session, `queue` (Stop hook, opt-in) for a live process without one,
+`spawn` when there is no process (the first message starts a driver). The
+driver is checked before the inbox because its child registers an inbox of its
+own. `is_live` trusts the driver and the registry before any hook, so a session
+with either is never "done". `head.caps` says what the composer may offer on
+that channel (attachments as blocks or paths, whether mode and model can be
+set, whether there is something to interrupt); the page never guesses.
 
 **Do not assert `from-mode`.** Claude Code holds a message that asserts no
 permission mode when the recipient runs with permissions bypassed, and asks in
@@ -177,12 +182,39 @@ user's remedy is `crossSessionInbound: accept` in their own settings.
 
 **`claude --bg --resume` forks.** It starts a copy under a new id. Only
 `claude -p --resume <id>` appends to the same transcript, so that is what a
-finished session gets, with the message on stdin (a prompt starting with `-`
-must not become a flag). `peer.child_env` strips every `CLAUDE*` variable except
+finished session gets. `peer.child_env` strips every `CLAUDE*` variable except
 `CLAUDE_CONFIG_DIR`: the daemon is usually a grandchild of a session and would
 otherwise hand the child its parent's id, inbox and token. When the child exits
 the session is added to `ended`, or its fresh mtime would count as a process
 for ten minutes and the composer would hide.
+
+## The driver
+
+`driver.py` keeps one `claude -p --input-format stream-json --output-format
+stream-json --permission-prompt-tool stdio` child per driven session, alive
+between turns, closed after `driver.idle_min`. Its docstring records what
+2.1.272 actually does on that wire; the short version:
+
+- **`--permission-prompt-tool stdio` or no prompts.** With the default flags a
+  permission prompt is answered by a local deny and never reaches the host.
+  With it, `can_use_tool` arrives as a `control_request`, and the daemon
+  answers it from the same `control.PendingCall` hold the hook path uses. The
+  `PermissionRequest` hook returns `{}` for a driven session so there is one
+  card per call, and silence is a deny because there is no terminal to fall
+  back to.
+- **`system/init` comes with every turn**, not at startup; `initialize` is
+  what returns the command catalogue with descriptions.
+- **A mode switch writes no `permission-mode` row**; the next user row carries
+  `permissionMode`. `turn_state` reads both.
+- **Never `--bare`** (keychain auth). Hooks stay on: the child's own
+  `SessionStart`/`SessionEnd` feed presence like any session.
+- **Two writers.** If the registry shows a terminal process for a driven
+  session, `reap_drivers` stops the child once idle and the channel flips to
+  `inbox`.
+
+`tests/fake_claude.py` speaks the same wire and writes real transcript rows,
+so `test_driver.py` and `TestDriverDelivery` run without Claude. Point
+`SCRIBE_CLAUDE` at any binary to drive something else.
 
 ## The rail
 
@@ -250,6 +282,7 @@ origin with an API that can approve tool calls.
 ```
 python3 -m unittest discover -s tests -t tests
 node tests/test_rail.mjs
+node tests/test_compose.mjs
 ```
 
 `tests/helpers.py::Isolated` redirects `SCRIBE_HOME` and `CLAUDE_CONFIG_DIR`

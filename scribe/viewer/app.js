@@ -1099,12 +1099,12 @@
       var terminal = session.state && session.state.activity_kind === "terminal";
       button(terminal ? "open" : "answer", !terminal, function () { selectSession(session.id); });
     } else if (session.phase === "your_turn") {
-      if (session.reply_via && session.reply_via !== "busy") {
+      if (session.reply_via) {
         button("reply", false, function () { replyFromBoard(session.id); });
       }
       button("read", true, function () { selectSession(session.id); });
     } else if (session.phase === "done") {
-      if (session.reply_via === "resume") {
+      if (session.reply_via === "spawn") {
         button("continue", false, function () { replyFromBoard(session.id); });
       }
     } else {
@@ -1323,6 +1323,7 @@
       if (!data || data.error) return showProblem(data && data.error);
       state.head = data.head || {};
       applyHead();
+      restoreDraft();
       (data.pending || []).forEach(function (p) { state.pending.set(p.call_id, p); });
       applyRounds(data.rounds || [], []);
       requestAnimationFrame(function () {
@@ -1352,10 +1353,10 @@
   // How a message typed here reaches the session. The daemon decides
   // (`reply_via`); the page only says what will happen when you press send.
   var DOCK_HINT = {
+    driver: "message this session…",
     inbox: "message this session — Claude gets it now…",
     queue: "reply from here — delivered when Claude finishes this turn…",
-    resume: "continue this session — Claude starts again in its folder and picks up here…",
-    busy: "Claude is working on your last message…",
+    spawn: "continue this session — Claude starts again in its folder and picks up here…",
   };
 
   function applyDock(head) {
@@ -1364,23 +1365,28 @@
     dock.hidden = !via;
     dock.dataset.via = via;
     var input = $("compose-input");
-    input.disabled = via === "busy";
-    $("compose-send").disabled = via === "busy";
     input.placeholder = DOCK_HINT[via] || "";
     renderQueue(head.queued || []);
     var note = "";
     if (via === "inbox" && head.inbox_held) {
       note = "this session runs with permissions bypassed, so Claude Code asks in the terminal before delivering a message from here";
-    } else if (via === "resume") {
-      note = "no Claude process is behind this session — sending runs `claude --resume` in its folder; the reply lands here";
+    } else if (via === "inbox") {
+      note = "running in a terminal — messages go straight in; mode and model are set there";
+    } else if (via === "spawn") {
+      note = "no Claude process is behind this session — sending starts one in its folder, and it stays for follow-ups";
+    } else if (via === "driver" && head.driver) {
+      note = head.driver.state === "running"
+        ? "Claude is working on your message…"
+        : "a Claude process of scribe's own is behind this session";
     }
-    if (via !== "queue") $("dock-note").textContent = note;
+    if (via !== "queue" || !(head.queued || []).length) $("dock-note").textContent = note;
   }
 
   function onDelivery(d) {
     if (d.status === "starting") $("dock-note").textContent = "starting Claude…";
-    else if (d.status === "delivered") toast(d.held ? "sent — approve it in the terminal to deliver" : "delivered");
-    else if (d.status === "done") $("dock-note").textContent = "";
+    else if (d.status === "delivered" && d.via === "inbox") toast(d.held ? "sent — approve it in the terminal to deliver" : "delivered");
+    else if (d.status === "delivered") $("dock-note").textContent = "Claude is working on your message…";
+    else if (d.status === "done") applyDock(state.head);
     else if (d.status === "failed") toast("could not continue: " + (d.error || "unknown error"));
   }
 
@@ -1561,11 +1567,12 @@
       sendReply();
     });
     $("compose-input").addEventListener("keydown", function (ev) {
-      if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); sendReply(); }
+      if (ev.key === "Escape") { ev.target.blur(); return; }
+      if (Compose.shouldSend(ev)) { ev.preventDefault(); sendReply(); }
     });
     $("compose-input").addEventListener("input", function (ev) {
-      ev.target.style.height = "auto";
-      ev.target.style.height = Math.min(144, ev.target.scrollHeight) + "px";
+      autogrow(ev.target);
+      saveDraft(ev.target.value);
     });
 
     // Clicking anywhere in a round focuses it and centres it — the behaviour
@@ -1583,17 +1590,62 @@
     window.addEventListener("hashchange", fromHash);
   }
 
+  function autogrow(input) {
+    input.style.height = "auto";
+    input.style.height = Math.min(144, input.scrollHeight) + "px";
+  }
+
+  // A half-written message survives switching sessions and reloading the
+  // page. Per session, because a draft belongs to the conversation it was
+  // written in.
+  function saveDraft(text) {
+    try {
+      var key = Compose.draftKey(state.sessionId);
+      if (text) localStorage.setItem(key, text);
+      else localStorage.removeItem(key);
+    } catch (e) {}
+  }
+
+  function restoreDraft() {
+    var input = $("compose-input");
+    var text = "";
+    try { text = localStorage.getItem(Compose.draftKey(state.sessionId)) || ""; } catch (e) {}
+    input.value = text;
+    autogrow(input);
+  }
+
+  function setSending(on) {
+    $("compose-input").disabled = on;
+    $("compose-send").disabled = on;
+    $("compose").dataset.sending = on ? "true" : "false";
+  }
+
   function sendReply() {
     var input = $("compose-input");
     var text = input.value.trim();
-    if (!text) return;
+    if (!text || $("compose").dataset.sending === "true") return;
+    // The text stays in the box until the daemon has it, so a refused or
+    // failed send costs nothing but a toast.
+    setSending(true);
     api("/api/message", { session_id: state.sessionId, text: text }).then(function (r) {
-      if (r.error) return toast(r.error);
+      setSending(false);
+      if (r.error) { input.focus(); return toast(r.error); }
       input.value = "";
-      input.style.height = "auto";
-      if (r.via === "inbox") onDelivery({ status: "delivered", held: r.held });
-      if (r.via === "resume") onDelivery({ status: "starting" });
+      autogrow(input);
+      saveDraft("");
+      input.focus();
+      if (r.via === "inbox") onDelivery({ status: "delivered", via: "inbox", held: r.held });
+      if (r.via === "driver" && r.queued) toast("queued — sent when this turn ends");
     });
+  }
+
+  function focusComposer() {
+    var dock = $("dock");
+    if (dock.hidden) return false;
+    var input = $("compose-input");
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    return true;
   }
 
   function toggleTheme() {
@@ -1607,10 +1659,16 @@
   function onKey(ev) {
     var typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
     if (ev.key === "/" && !typing) { ev.preventDefault(); $("find-input").focus(); return; }
+    if ((ev.metaKey || ev.ctrlKey) && ev.key === "k") {
+      if (focusComposer()) ev.preventDefault();
+      return;
+    }
     if (typing) return;
     if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
 
-    if (ev.key === "j" || ev.key === "k") {
+    if (ev.key === "c") {
+      if (focusComposer()) ev.preventDefault();
+    } else if (ev.key === "j" || ev.key === "k") {
       ev.preventDefault();
       stepRound(ev.key === "j" ? 1 : -1);
     } else if (ev.key === "t") {

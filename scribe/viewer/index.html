@@ -68,10 +68,10 @@
               <textarea
                 id="compose-input"
                 rows="1"
-                placeholder="reply from here — delivered when Claude finishes this turn…"
+                placeholder="message this session…"
                 spellcheck="true"
               ></textarea>
-              <button class="btn" type="submit" id="compose-send">send</button>
+              <button class="btn" type="submit" id="compose-send" title="Send (Enter). Shift+Enter for a new line">send</button>
             </form>
             <div class="dock-note" id="dock-note"></div>
           </div>
@@ -85,6 +85,7 @@
 
     <script src="/static/marked.min.js"></script>
     <script src="/static/rail.js"></script>
+    <script src="/static/compose.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>

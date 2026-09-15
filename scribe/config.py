@@ -60,9 +60,17 @@ DEFAULTS: dict[str, Any] = {
     # own inbound policy (a bypass-mode session asks before accepting one).
     "messaging": {
         "enabled": True,
-        # A session with no process behind it is started again with
-        # `claude --bg --resume` so the message has somewhere to go.
-        "resume": True,
+    },
+    # A session with no process behind it gets a headless Claude Code child
+    # of our own (`claude -p --input-format stream-json --resume <id>`), kept
+    # between turns and closed after `idle_min` of silence. The page can pick
+    # its permission mode and model; `bypassPermissions` only if allowed here.
+    "driver": {
+        "enabled": True,
+        "idle_min": 30,
+        "default_mode": "",  # "" = Claude Code's own permissions.defaultMode
+        "default_model": "",  # "" = the account default
+        "allow_bypass": False,
     },
     # Secret scrubbing applied to markdown and the viewer payload alike
     "redact": {
@@ -90,7 +98,10 @@ ENV_OVERRIDES = {
     "remote_approval.wait_s": ("SCRIBE_APPROVAL_WAIT", int),
     "reply_queue.enabled": ("SCRIBE_REPLY_QUEUE", _bool),
     "messaging.enabled": ("SCRIBE_MESSAGING", _bool),
-    "messaging.resume": ("SCRIBE_MESSAGING_RESUME", _bool),
+    "driver.enabled": ("SCRIBE_DRIVER", _bool),
+    "driver.idle_min": ("SCRIBE_DRIVER_IDLE_MIN", int),
+    "driver.default_mode": ("SCRIBE_DRIVER_MODE", str),
+    "driver.default_model": ("SCRIBE_DRIVER_MODEL", str),
 }
 
 

@@ -244,21 +244,30 @@ process and asks in the terminal before delivering it. scribe does not claim
 otherwise on your behalf. To let page messages through without the prompt, set
 `"crossSessionInbound": "accept"` in your Claude Code settings.
 
-**A finished session.** With no process behind it, sending runs
-`claude -p --resume <id>` in the session's own directory with your message on
-stdin. Claude Code appends the prompt and everything that follows to the same
-transcript under the same id, so the page updates as the turn runs, and
-`claude --resume` in a terminal later picks up from there. Print mode never
-shows a permission dialog: a tool the session's settings do not already allow
-is refused and Claude says so. The board's *done* strip offers *continue* for
-these; `messaging.resume` turns it off.
+**A finished session.** With no process behind it, sending starts a headless
+Claude Code child of scribe's own, `claude -p --resume <id>` speaking Claude
+Code's stream-json protocol, in the session's own directory. It appends to the
+same transcript under the same id, so the page updates as the turn runs and
+`claude --resume` in a terminal later picks up from there. The child stays
+between turns (follow-ups go straight in, a message sent mid-turn is queued)
+and closes after `driver.idle_min` of silence. Because scribe is the host of
+that process, the page gets what a terminal has: pictures in the message, the
+permission mode and model to pick, a stop button, and the session's skills and
+commands, and a tool that needs permission is approved in the margin rail
+rather than refused. The board's *done* strip offers *continue* for these.
+
+If you open the same session in a terminal, scribe retires its child after the
+current turn so two processes never write one transcript.
 
 **A running session without an inbox** (an older Claude Code, or messaging
 turned off there) falls back to the Stop-hook queue below when that is enabled.
 
 ```bash
 scribe config set messaging.enabled false   # hide the compose box entirely
-scribe config set messaging.resume false    # never start a process
+scribe config set driver.enabled false      # never start a process
+scribe config set driver.idle_min 10        # close an idle child sooner
+scribe config set driver.default_mode plan  # mode a started session begins in
+scribe config set driver.allow_bypass true  # offer bypassPermissions on the page
 ```
 
 ## Two-way control through hooks
@@ -309,7 +318,10 @@ it is why the blanket claim at the top of this file is about recording.
 | `explain.enabled` | `true` | plain-English margin notes |
 | `explain.model` | `claude-haiku-4-5` | |
 | `messaging.enabled` | `true` | the compose box: message a session from the page |
-| `messaging.resume` | `true` | `claude -p --resume` a session with no process behind it |
+| `driver.enabled` | `true` | start a headless Claude Code child for a session with no process behind it |
+| `driver.idle_min` | `30` | close that child after this many idle minutes |
+| `driver.default_mode` | `""` | permission mode for a started session (`""` = Claude Code's `permissions.defaultMode`) |
+| `driver.allow_bypass` | `false` | offer `bypassPermissions` on the page |
 | `remote_approval.enabled` | `false` | approve from the browser |
 | `reply_queue.enabled` | `false` | Stop-hook replies, for sessions without an inbox |
 | `redact.enabled` | `true` | scrub secrets |
@@ -358,6 +370,7 @@ cached so nothing is sent twice, and `explain.enabled false` turns it off.
 ```bash
 python3 -m unittest discover -s tests -t tests   # 167 tests
 node tests/test_rail.mjs                          # the rail's layout solver
+node tests/test_compose.mjs                       # the composer's key and token rules
 ```
 
 `SCRIBE_HOME` and `CLAUDE_CONFIG_DIR` redirect everything, which is how the tests

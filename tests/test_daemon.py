@@ -542,38 +542,31 @@ class TestInboxDelivery(DaemonHarness):
         self.assertIn("error", self.post("/api/message", {"session_id": "nope", "text": "hi"}))
 
 
-class TestResumeDelivery(DaemonHarness):
-    """No process behind a session: the daemon starts one with `claude -p --resume`."""
+class TestDriverDelivery(DaemonHarness):
+    """No process behind a session: the first message starts a driver of ours."""
 
     def setUp(self):
         super().setUp()
-        self.path = self.transcript_path(session_id="sess-1", cwd=str(self.tmp))
-        self.write_rows(self.path, simple_session("sess-1", cwd=str(self.tmp)))
+        from test_driver import make_fake_binary
+
+        self.binary = make_fake_binary(self.tmp)
+        os.environ["SCRIBE_CLAUDE"] = str(self.binary)
+        self.addCleanup(os.environ.pop, "SCRIBE_CLAUDE", None)
+        self.fake_log = self.tmp / "fake.log"
+        os.environ["FAKE_CLAUDE_LOG"] = str(self.fake_log)
+        self.addCleanup(os.environ.pop, "FAKE_CLAUDE_LOG", None)
+        # Resolved: the child reports its cwd with symlinks followed
+        # (/var -> /private/var on macOS), and so does a real transcript.
+        self.cwd = Path(os.path.realpath(self.tmp)) / "proj"
+        self.cwd.mkdir()
+        self.path = self.transcript_path(session_id="sess-1", cwd=str(self.cwd))
+        self.write_rows(self.path, simple_session("sess-1", cwd=str(self.cwd)))
         old = time.time() - 3600
         os.utime(self.path, (old, old))
         self.hub.refresh_index(force=True)
-        self.calls = []
-        self.finished = threading.Event()
-        self._real_resume = daemon.peer.resume
-
-        def fake_resume(session_id, cwd, text, timeout=0):
-            self.calls.append((session_id, cwd, text))
-            from helpers import assistant_row, user_row
-
-            self.append_rows(
-                self.path,
-                [
-                    user_row(session_id, text, "2026-07-28T11:00:00.000Z", "u9", cwd=cwd),
-                    assistant_row(session_id, [{"type": "text", "text": "Continued."}], "2026-07-28T11:00:05.000Z", "a9", cwd=cwd),
-                ],
-            )
-            self.finished.set()
-            return {"ok": True}
-
-        daemon.peer.resume = fake_resume
 
     def tearDown(self):
-        daemon.peer.resume = self._real_resume
+        self.hub.stop_all_drivers()
         super().tearDown()
 
     def card(self, session_id="sess-1"):
@@ -582,44 +575,141 @@ class TestResumeDelivery(DaemonHarness):
                 return item
         self.fail("no card for " + session_id)
 
-    def test_a_finished_session_offers_resume(self):
+    def head(self, session_id="sess-1"):
+        return self.get("/api/session?id=" + session_id)["head"]
+
+    def fake_log_rows(self, event=None):
+        if not self.fake_log.exists():
+            return []
+        rows = [json.loads(l) for l in self.fake_log.read_text().splitlines() if l.strip()]
+        return [r for r in rows if event is None or r.get("event") == event]
+
+    def wait_for(self, pred, timeout=6.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return True
+            time.sleep(0.05)
+        return False
+
+    def wait_idle(self, session_id="sess-1"):
+        return self.wait_for(lambda: (self.hub.driver_for(session_id) or type("x", (), {"state": ""})).state == "idle")
+
+    def test_a_finished_session_offers_spawn(self):
         card = self.card()
         self.assertEqual(card["phase"], "done")
-        self.assertEqual(card["reply_via"], "resume")
+        self.assertEqual(card["reply_via"], "spawn")
+        caps = self.head()["caps"]
+        self.assertEqual(caps["attachments"], "blocks")
+        self.assertTrue(caps["mode"]["settable"])
+        self.assertNotIn("bypassPermissions", caps["mode"]["choices"])
 
-    def test_resume_can_be_turned_off(self):
-        self.hub.cfg["messaging"]["resume"] = False
+    def test_the_driver_can_be_turned_off(self):
+        self.hub.cfg["driver"]["enabled"] = False
         self.assertEqual(self.card()["reply_via"], "")
 
-    def test_message_starts_a_resume_child_in_the_sessions_directory(self):
-        reply = self.post("/api/message", {"session_id": "sess-1", "text": "keep going"})
-        self.assertEqual(reply, {"ok": True, "via": "resume"})
-        self.assertTrue(self.finished.wait(5))
-        self.assertEqual(self.calls, [("sess-1", str(self.tmp), "keep going")])
-        for _ in range(50):
-            if "sess-1" not in self.hub.resuming:
-                break
-            time.sleep(0.05)
-        self.assertNotIn("sess-1", self.hub.resuming)
-        snap = self.get("/api/session?id=sess-1")
-        self.assertEqual(snap["rounds"][-1]["prompt"], "keep going")
-        # The child has exited: the card is done again, and offers resume again.
+    def test_a_message_starts_a_driver_in_the_sessions_directory(self):
+        reply = self.post("/api/message", {"session_id": "sess-1", "text": "keep going", "mode": "plan"})
+        self.assertEqual(reply, {"ok": True, "via": "driver", "queued": False})
+        started = self.fake_log_rows("start")[0]
+        self.assertEqual(started["cwd"], str(self.cwd))
+        argv = started["argv"]
+        self.assertEqual(argv[argv.index("--resume") + 1], "sess-1")
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertTrue(self.wait_idle())
+        self.assertTrue(self.wait_for(lambda: self.get("/api/session?id=sess-1")["rounds"][-1].get("prompt") == "keep going"))
+        # The child stays: the card is live, the channel is the driver, and
+        # the driver's mode is what the card and head report.
         card = self.card()
-        self.assertEqual(card["phase"], "done")
-        self.assertEqual(card["reply_via"], "resume")
+        self.assertTrue(card["live"])
+        self.assertEqual(card["reply_via"], "driver")
+        self.assertEqual(card["phase"], "your_turn")
+        self.assertEqual(card["state"]["mode"], "plan")
+        head = self.head()
+        self.assertEqual(head["driver"]["state"], "idle")
+        self.assertEqual(head["caps"]["mode"]["value"], "plan")
+        self.assertEqual(head["caps"]["commands"], "live")
+        # A second message reuses the child rather than starting another.
+        self.post("/api/message", {"session_id": "sess-1", "text": "and again"})
+        self.assertTrue(self.wait_idle())
+        self.assertEqual(len(self.fake_log_rows("start")), 1)
+        self.assertEqual([r["text"] for r in self.fake_log_rows("user")], ["keep going", "and again"])
 
-    def test_a_second_message_while_the_child_runs_is_refused(self):
-        gate = threading.Event()
-
-        def slow_resume(session_id, cwd, text, timeout=0):
-            gate.wait(5)
-            return {"ok": True}
-
-        daemon.peer.resume = slow_resume
-        first = self.post("/api/message", {"session_id": "sess-1", "text": "one"})
-        self.assertEqual(first["via"], "resume")
-        self.assertEqual(self.card()["reply_via"], "busy")
-        self.assertEqual(self.card()["phase"], "working")
+    def test_a_message_during_a_turn_is_queued(self):
+        self.post("/api/message", {"session_id": "sess-1", "text": "SLOW one"})
         second = self.post("/api/message", {"session_id": "sess-1", "text": "two"})
-        self.assertIn("error", second)
-        gate.set()
+        self.assertEqual(second, {"ok": True, "via": "driver", "queued": True})
+        self.assertEqual(self.head()["queued"], ["two"])
+        self.assertEqual(self.card()["queued"], 1)
+        self.assertEqual(self.card()["phase"], "working")
+        self.post("/api/unqueue", {"session_id": "sess-1", "index": 0})
+        self.assertEqual(self.head()["queued"], [])
+        self.assertTrue(self.wait_idle())
+        self.assertEqual([r["text"] for r in self.fake_log_rows("user")], ["SLOW one"])
+
+    def test_mode_model_and_interrupt_endpoints(self):
+        self.assertIn("error", self.post("/api/session/mode", {"session_id": "sess-1", "mode": "plan"}))
+        self.post("/api/message", {"session_id": "sess-1", "text": "hi"})
+        self.assertTrue(self.wait_idle())
+        self.assertEqual(self.post("/api/session/mode", {"session_id": "sess-1", "mode": "acceptEdits"}), {"ok": True, "mode": "acceptEdits"})
+        self.assertEqual(self.head()["caps"]["mode"]["value"], "acceptEdits")
+        self.assertIn("error", self.post("/api/session/mode", {"session_id": "sess-1", "mode": "bypassPermissions"}))
+        self.assertEqual(self.post("/api/session/model", {"session_id": "sess-1", "model": "haiku"}), {"ok": True, "model": "haiku"})
+        self.assertIn("error", self.post("/api/session/model", {"session_id": "sess-1", "model": "gpt-9"}))
+        self.post("/api/message", {"session_id": "sess-1", "text": "SLOW again"})
+        self.assertTrue(self.wait_for(lambda: self.head()["caps"]["interrupt"]))
+        self.assertEqual(self.post("/api/interrupt", {"session_id": "sess-1"}), {"ok": True})
+        self.assertTrue(self.wait_idle())
+        self.assertEqual(self.hub.driver_for("sess-1").last_result["subtype"], "error_during_execution")
+
+    def test_a_permission_request_is_held_for_the_page(self):
+        self.post("/api/message", {"session_id": "sess-1", "text": "PERMIT this"})
+        self.assertTrue(self.wait_for(lambda: self.card()["pending"]))
+        card = self.card()
+        self.assertEqual(card["phase"], "needs_you")
+        call = card["pending"][0]
+        self.assertEqual(call["tool_name"], "Bash")
+        self.post("/api/decision", {"call_id": call["call_id"], "behavior": "allow"})
+        self.assertTrue(self.wait_idle())
+        self.assertEqual(self.fake_log_rows("permission")[0]["decision"]["behavior"], "allow")
+        self.assertEqual(self.card()["pending"], [])
+
+    def test_the_hook_passes_for_a_driven_session(self):
+        self.post("/api/message", {"session_id": "sess-1", "text": "hi"})
+        self.assertTrue(self.wait_idle())
+        out, elapsed = self.run_hook(
+            {"hook_event_name": "PermissionRequest", "session_id": "sess-1", "tool_name": "Bash",
+             "tool_input": {"command": "ls"}, "tool_use_id": "toolu_hook"}
+        )
+        self.assertEqual(out, {})
+        self.assertLess(elapsed, 5)
+        self.assertEqual(self.card()["pending"], [])
+
+    def test_an_idle_driver_is_retired_and_spawn_is_offered_again(self):
+        self.post("/api/message", {"session_id": "sess-1", "text": "hi"})
+        self.assertTrue(self.wait_idle())
+        self.hub.reap_drivers(now=time.time() + 3 * 3600)
+        self.assertIsNone(self.hub.driver_for("sess-1"))
+        self.assertEqual(self.card()["reply_via"], "spawn")
+        self.assertEqual(self.card()["phase"], "done")
+
+    def test_a_terminal_taking_the_session_retires_the_driver(self):
+        from test_peer import FakeInbox
+
+        self.post("/api/message", {"session_id": "sess-1", "text": "hi"})
+        self.assertTrue(self.wait_idle())
+        inbox = FakeInbox("sess-1")
+        self.addCleanup(inbox.close)
+        inbox.register()
+        self.hub.peers(force=True)
+        self.hub.reap_drivers()
+        self.assertIsNone(self.hub.driver_for("sess-1"))
+        self.assertEqual(self.card()["reply_via"], "inbox")
+
+    def test_a_child_that_dies_leaves_the_session_done(self):
+        self.post("/api/message", {"session_id": "sess-1", "text": "DIE"})
+        self.assertTrue(self.wait_for(lambda: self.hub.driver_for("sess-1") is None))
+        self.assertIn("sess-1", self.hub.ended)
+        self.assertEqual(self.card()["phase"], "done")
+        self.assertEqual(self.card()["reply_via"], "spawn")
+

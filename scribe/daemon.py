@@ -38,6 +38,7 @@ from . import (
     build,
     config,
     control,
+    driver,
     explain,
     paths,
     peer,
@@ -236,8 +237,8 @@ class Hub:
         self.presence: dict[str, float] = {}
         self.ended: set[str] = set()
         self.attention: dict[str, str] = {}  # session_id -> last Notification type
-        # Sessions a `claude -p --resume` child is working on right now.
-        self.resuming: dict[str, float] = {}
+        # Headless children the page is driving, by session (see driver.py).
+        self.drivers: dict[str, driver.Driver] = {}
         self._peers: dict[str, peer.Peer] = {}
         self._peers_at = 0.0
         self._card_sig: dict[str, str] = {}
@@ -290,8 +291,8 @@ class Hub:
         now = now or time.time()
         sid = ref.session_id
         # A session with an inbox has a process behind it by definition, and a
-        # resume child is one too. Both are known without any hook.
-        if sid in self.peers() or sid in self.resuming:
+        # driver child is one too. Both are known without any hook.
+        if self.driver_for(sid) is not None or sid in self.peers():
             return True
         if sid in self.ended:
             return False
@@ -345,20 +346,25 @@ class Hub:
             state["activity_kind"] = "reply"
         else:
             phase = state["phase"]
+        drv = self.driver_for(sid)
+        if drv is not None:
+            # The driver knows its mode before the transcript does.
+            if drv.mode:
+                state["mode"] = drv.mode
+            if drv.state == "running" and phase in ("done", "your_turn") and not pending:
+                # The turn has started; the prompt has not reached the file yet.
+                phase = "working"
+                state["activity"] = "working on your message"
+                state["activity_kind"] = "wait"
         if phase == "working" and state.get("mode") == "plan":
             phase = "planning"
-        if sid in self.resuming and phase in ("done", "your_turn"):
-            # The child is starting; the prompt has not reached the file yet.
-            phase = "working"
-            state["activity"] = "starting Claude"
-            state["activity_kind"] = "wait"
 
         item["live"] = alive
         item["armed"] = self.control.is_armed(sid)
         item["phase"] = phase
         item["state"] = state
         item["pending"] = pending
-        item["queued"] = len(self.control.queued(sid))
+        item["queued"] = len(self.queued_for(sid))
         item["reply_via"] = self.reply_via(ref, alive)
         return item
 
@@ -494,15 +500,50 @@ class Hub:
 
     def head_for(self, live: LiveSession) -> dict:
         head = dict(live.head_json)
+        via = self.reply_via(live.ref, self.is_live(live.ref))
+        drv = self.driver_for(live.id)
         head["armed"] = self.control.is_armed(live.id)
         head["live"] = live.id in self.registered
-        head["queued"] = self.control.queued(live.id)
+        head["queued"] = self.queued_for(live.id)
         head["chain"] = self.control.chain_count(live.id)
         head["remote_approval"] = bool((self.cfg.get("remote_approval") or {}).get("enabled"))
         head["reply_queue"] = bool((self.cfg.get("reply_queue") or {}).get("enabled"))
-        head["reply_via"] = self.reply_via(live.ref, self.is_live(live.ref))
+        head["reply_via"] = via
         head["inbox_held"] = (live.state or {}).get("mode") in peer.HELD_MODES
+        head["driver"] = drv.as_dict() if drv is not None else None
+        head["caps"] = self.caps_for(live.ref, via, live.state, head.get("models") or [])
         return head
+
+    def caps_for(self, ref, via: str, state: dict | None, models: list) -> dict:
+        """What the composer may offer for this session, decided here, not
+        guessed on the page. Each channel carries a different subset."""
+        drv = self.driver_for(ref.session_id) if ref is not None else None
+        dcfg = self.cfg.get("driver") or {}
+        modes = [m for m in driver.MODES if m != "bypassPermissions" or dcfg.get("allow_bypass")]
+        mode = (drv.mode if drv is not None else "") or (state or {}).get("mode") or ""
+        if via == "spawn" and not mode:
+            mode = self.default_mode()
+        model = (drv.caps.model if drv is not None else "") or (models[-1] if models else "")
+        settable = via in ("driver", "spawn")
+        return {
+            "attachments": "blocks" if settable else ("paths" if via in ("inbox", "queue") else "none"),
+            "mode": {"value": mode, "settable": settable, "choices": modes},
+            "model": {"value": model, "settable": settable, "choices": list(driver.MODELS)},
+            "interrupt": drv is not None and drv.state == "running",
+            "commands": "live" if drv is not None else "disk",
+            "context_usage": drv is not None,
+        }
+
+    def default_mode(self) -> str:
+        """The mode a spawned session starts in: ours, else Claude Code's own."""
+        configured = str((self.cfg.get("driver") or {}).get("default_mode") or "")
+        if configured:
+            return configured
+        try:
+            settings = paths.read_json(paths.claude_home() / "settings.json") or {}
+            return str((settings.get("permissions") or {}).get("defaultMode") or "")
+        except Exception:
+            return ""
 
     def snapshot(self, session_id: str) -> dict | None:
         live = self.get(session_id)
@@ -531,12 +572,18 @@ class Hub:
     def reply_via(self, ref: transcript.SessionRef | None, alive: bool) -> str:
         """How a message typed on the page would reach this session.
 
-        ``inbox``   straight into the running process, now.
+        ``driver``  a headless child of ours is behind it: straight in, with
+                    images, a mode and a model to choose, and a stop button.
+        ``inbox``   straight into the running terminal process, now.
         ``queue``   through the Stop hook when the turn ends (the old path,
                     opt-in, for a process that has no inbox).
-        ``resume``  no process: ``claude -p --resume`` starts one.
-        ``busy``    a resume child is still working; wait for it.
+        ``spawn``   no process: the first message starts a driver on the
+                    same id, which appends to the same transcript.
         ``""``      no way in.
+
+        The driver is checked before the inbox because its child registers an
+        inbox of its own; messaging our own child through the side door would
+        lose everything the driver adds.
 
         ``ref`` may be None for a session the index does not know yet (a
         transcript too small to list): the Stop hook can still carry a queued
@@ -547,22 +594,191 @@ class Hub:
         if ref is None:
             return "queue" if queue_on else ""
         sid = ref.session_id
-        if sid in self.resuming:
-            return "busy"
-        if messaging.get("enabled", True) and sid in self.peers():
+        if not messaging.get("enabled", True):
+            return "queue" if alive and queue_on else ""
+        if self.driver_for(sid) is not None:
+            return "driver"
+        if sid in self.peers():
             return "inbox"
         if alive and queue_on:
             return "queue"
         if (
             not alive
-            and messaging.get("enabled", True)
-            and messaging.get("resume", True)
+            and (self.cfg.get("driver") or {}).get("enabled", True)
             and not ref.archived
             and ref.cwd
             and os.path.isdir(ref.cwd)
         ):
-            return "resume"
+            return "spawn"
         return ""
+
+    # -- the driver ---------------------------------------------------------
+
+    def driver_for(self, session_id: str) -> driver.Driver | None:
+        """The live driver behind a session, or None."""
+        with self._lock:
+            drv = self.drivers.get(session_id)
+        return drv if drv is not None and drv.alive else None
+
+    def queued_for(self, session_id: str) -> list[str]:
+        drv = self.driver_for(session_id)
+        if drv is not None:
+            return drv.queued()
+        return self.control.queued(session_id)
+
+    def drop_queued(self, session_id: str, index: int) -> None:
+        drv = self.driver_for(session_id)
+        if drv is not None:
+            drv.drop_queued(index)
+        else:
+            self.control.drop_queued(session_id, index)
+
+    def spawn_driver(self, session_id: str, cwd: str, *, resume: bool, mode: str = "", model: str = "") -> driver.Driver:
+        """Start a headless child on a session. Raises ``DriverError``."""
+        dcfg = self.cfg.get("driver") or {}
+        mode = mode or self.default_mode()
+        if mode == "bypassPermissions" and not dcfg.get("allow_bypass"):
+            mode = "default"
+        model = model or str(dcfg.get("default_model") or "")
+        drv = driver.Driver(
+            session_id,
+            cwd,
+            resume=resume,
+            mode=mode,
+            model=model,
+            on_event=self._on_driver_event,
+            on_permission=self._driver_permission,
+        )
+        with self._lock:
+            old = self.drivers.get(session_id)
+        if old is not None and old.alive:
+            return old
+        self.broadcast(session_id, "delivery", {"status": "starting", "via": "driver"})
+        drv.start()
+        with self._lock:
+            self.drivers[session_id] = drv
+            self.ended.discard(session_id)
+        self._announce_head(session_id)
+        return drv
+
+    def deliver_to_driver(self, ref: transcript.SessionRef, text: str, images=None, mode: str = "", model: str = "") -> dict:
+        sid = ref.session_id
+        drv = self.driver_for(sid)
+        if drv is None:
+            try:
+                drv = self.spawn_driver(sid, ref.cwd, resume=True, mode=mode, model=model)
+            except driver.DriverError as exc:
+                self.broadcast(sid, "delivery", {"status": "failed", "via": "driver", "error": str(exc)})
+                return {"ok": False, "error": str(exc)}
+        result = drv.send(text, images)
+        if not result.get("ok"):
+            return {"ok": False, "error": result.get("error") or "the driver refused the message"}
+        if result.get("queued"):
+            self.broadcast(sid, "queue", {"queued": drv.queued()})
+        else:
+            self.broadcast(sid, "delivery", {"status": "delivered", "via": "driver"})
+        self._announce_head(sid)
+        return {"ok": True, "via": "driver", "queued": bool(result.get("queued"))}
+
+    def stop_driver(self, session_id: str) -> None:
+        with self._lock:
+            drv = self.drivers.pop(session_id, None)
+        if drv is not None:
+            drv.stop()
+
+    def stop_all_drivers(self) -> None:
+        with self._lock:
+            drivers = list(self.drivers.values())
+            self.drivers.clear()
+        for drv in drivers:
+            try:
+                drv.stop(grace=3.0)
+            except Exception:
+                pass
+
+    def reap_drivers(self, now: float | None = None) -> None:
+        """Retire drivers that exited, idled out, or lost their session to a
+        terminal. Called from the watcher tick."""
+        now = now or time.time()
+        idle_s = max(60.0, float((self.cfg.get("driver") or {}).get("idle_min", 30)) * 60)
+        with self._lock:
+            drivers = list(self.drivers.items())
+        peers = self.peers()
+        for sid, drv in drivers:
+            if not drv.alive:
+                with self._lock:
+                    if self.drivers.get(sid) is drv:
+                        self.drivers.pop(sid, None)
+                continue
+            if drv.state != "idle":
+                continue
+            taken_over = sid in peers and drv.proc is not None and peers[sid].pid != drv.proc.pid
+            if taken_over or now - drv.idle_since > idle_s:
+                # A terminal now has the session (two writers on one
+                # transcript is the thing to avoid), or nobody has needed
+                # the child for a while. Either way the next message from
+                # the page starts a fresh one with --resume.
+                self.stop_driver(sid)
+                self._announce_head(sid)
+
+    def _on_driver_event(self, drv: driver.Driver, kind: str, data: dict) -> None:
+        sid = drv.session_id
+        if kind == "exit":
+            with self._lock:
+                if self.drivers.get(sid) is drv:
+                    self.drivers.pop(sid, None)
+                # Without hooks nothing else says the child is gone, and a
+                # fresh mtime would otherwise count as a live process.
+                self.ended.add(sid)
+            live = self.get(sid, create=False)
+            if live is not None:
+                self.poll_session(live)
+            if data.get("error"):
+                self.broadcast(sid, "delivery", {"status": "failed", "via": "driver", "error": data["error"]})
+        elif kind == "result":
+            self.broadcast(sid, "delivery", {"status": "done", "via": "driver"})
+            self.broadcast(sid, "queue", {"queued": drv.queued()})
+            live = self.get(sid, create=False)
+            if live is not None:
+                self.poll_session(live)
+        elif kind == "turn":
+            self.broadcast(sid, "queue", {"queued": drv.queued()})
+        self._announce_head(sid)
+
+    def _driver_permission(self, drv: driver.Driver, request: dict) -> dict:
+        """A ``can_use_tool`` request from a driven child.
+
+        Same hold as the hook path, same card in the rail, one difference:
+        there is no terminal to fall back to, so silence is a deny.
+        """
+        sid = drv.session_id
+        call_id = str(request.get("tool_use_id") or "") or f"anon-{time.time_ns()}"
+        tool_name = str(request.get("tool_name") or "Tool")
+        tool_input = request.get("input") if isinstance(request.get("input"), dict) else {}
+        pending = control.PendingCall(
+            call_id=call_id,
+            session_id=sid,
+            tool_name=tool_name,
+            tool_input=self.redactor.scrub_data(tool_input),
+            permission_reason=str(request.get("description") or ""),
+        )
+        canned = self.explainer.canned(tool_name, tool_input)
+        if canned:
+            pending.explanation, pending.explanation_tier = canned, 0
+        wait_s = float((self.cfg.get("remote_approval") or {}).get("wait_s", 120))
+        self.control.open_call(pending, wait_s)
+        self.broadcast(sid, "pending", {**pending.as_dict(), "holding": True})
+        self.announce_card(sid)
+        self.explainer.request(call_id, tool_name, tool_input)
+
+        behavior, updated = self.control.wait_for(pending, wait_s)
+        self.broadcast(sid, "pending", {**pending.as_dict(), "holding": False})
+        self.announce_card(sid)
+        if behavior == "allow":
+            return {"behavior": "allow", "updatedInput": updated if isinstance(updated, dict) and updated else tool_input}
+        if pending.decided_by == "timeout":
+            return {"behavior": "deny", "message": f"scribe: nobody answered within {wait_s:.0f}s"}
+        return {"behavior": "deny", "message": "scribe: denied from the page"}
 
     def send_to_inbox(self, session_id: str, text: str) -> dict:
         target = self.peers(force=True).get(session_id)
@@ -576,44 +792,6 @@ class Hub:
         self.broadcast(session_id, "delivery", {"status": "delivered", "via": "inbox", "held": held})
         self.announce_card(session_id)
         return {"ok": True, "via": "inbox", "held": held}
-
-    def start_resume(self, ref: transcript.SessionRef, text: str) -> dict:
-        """Continue a finished session on a worker thread.
-
-        The request returns as soon as the child is started. Progress reaches
-        the page as ``delivery`` events and, as always, through the transcript
-        itself: the watcher sees the new rows as the child writes them.
-        """
-        sid = ref.session_id
-        with self._lock:
-            if sid in self.resuming:
-                return {"ok": False, "error": "Claude is still working on the last message"}
-            self.resuming[sid] = time.time()
-        self.broadcast(sid, "delivery", {"status": "starting", "via": "resume"})
-        self._announce_head(sid)
-
-        def work():
-            try:
-                result = peer.resume(sid, ref.cwd, text)
-            except Exception as exc:  # never leave a session marked busy
-                result = {"ok": False, "error": str(exc)[:300]}
-            with self._lock:
-                self.resuming.pop(sid, None)
-                # The child exited; without hooks nothing else says so, and
-                # the fresh mtime would otherwise count as a live process.
-                self.ended.add(sid)
-            live = self.get(sid, create=False)
-            if live is not None:
-                self.poll_session(live)
-            self.broadcast(
-                sid,
-                "delivery",
-                {"status": "done" if result.get("ok") else "failed", "via": "resume", "error": result.get("error", "")},
-            )
-            self._announce_head(sid)
-
-        threading.Thread(target=work, daemon=True, name=f"scribe-resume-{sid[:8]}").start()
-        return {"ok": True, "via": "resume"}
 
     def _announce_head(self, session_id: str) -> None:
         self.announce_card(session_id)
@@ -746,6 +924,8 @@ class Hub:
             if ref.session_id not in have and self.is_live(ref, now):
                 have.add(ref.session_id)
                 self.get(ref.session_id)
+
+        self.reap_drivers(now)
 
         with self._lock:
             for session_id, last in list(self.registered.items()):
@@ -930,11 +1110,14 @@ class Handler(BaseHTTPRequestHandler):
                     self.hub.broadcast(session_id, "queue", {"queued": self.hub.control.queued(session_id)})
                 self.hub.announce_card(session_id)
                 return self._json({"ok": bool(depth), "via": "queue", "queued": depth})
-            if via == "resume":
-                result = self.hub.start_resume(ref, text)
-                return self._json(result, 200 if result.get("ok") else 409)
-            if via == "busy":
-                return self._json({"error": "Claude is still working on the last message"}, 409)
+            if via in ("driver", "spawn"):
+                result = self.hub.deliver_to_driver(
+                    ref,
+                    text,
+                    mode=str(data.get("mode") or ""),
+                    model=str(data.get("model") or ""),
+                )
+                return self._json(result, 200 if result.get("ok") else 502)
             if not (self.hub.cfg.get("messaging") or {}).get("enabled", True):
                 return self._json({"error": "messaging is disabled (scribe config set messaging.enabled true)"}, 409)
             return self._json({"error": "no way to reach this session: it is running without an inbox"}, 409)
@@ -942,10 +1125,41 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/unqueue":
             session_id = str(data.get("session_id") or "")
             index = int(data.get("index") or 0)
-            self.hub.control.drop_queued(session_id, index)
-            self.hub.broadcast(session_id, "queue", {"queued": self.hub.control.queued(session_id)})
+            self.hub.drop_queued(session_id, index)
+            self.hub.broadcast(session_id, "queue", {"queued": self.hub.queued_for(session_id)})
             self.hub.announce_card(session_id)
             return self._json({"ok": True})
+
+        if route in ("/api/interrupt", "/api/session/mode", "/api/session/model"):
+            # All three only mean something with a driver behind the session.
+            session_id = str(data.get("session_id") or "")
+            drv = self.hub.driver_for(session_id)
+            if drv is None:
+                ref = self.hub.ref_for(session_id)
+                via = self.hub.reply_via(ref, self.hub.is_live(ref) if ref else False)
+                if via == "inbox":
+                    return self._json({"error": "this session is running in a terminal; change it there"}, 409)
+                return self._json({"error": "no Claude process of ours is behind this session"}, 409)
+            try:
+                if route == "/api/interrupt":
+                    drv.interrupt()
+                    return self._json({"ok": True})
+                if route == "/api/session/mode":
+                    mode = str(data.get("mode") or "")
+                    dcfg = self.hub.cfg.get("driver") or {}
+                    if mode == "bypassPermissions" and not dcfg.get("allow_bypass"):
+                        return self._json({"error": "bypassPermissions is off (scribe config set driver.allow_bypass true)"}, 409)
+                    now = drv.set_mode(mode)
+                    self.hub._announce_head(session_id)
+                    return self._json({"ok": True, "mode": now})
+                model = str(data.get("model") or "default")
+                if model not in driver.MODELS:
+                    return self._json({"error": f"unknown model: {model}"}, 400)
+                drv.set_model(model)
+                self.hub._announce_head(session_id)
+                return self._json({"ok": True, "model": model})
+            except driver.DriverError as exc:
+                return self._json({"error": str(exc)}, 502)
 
         if route == "/api/arm":
             session_id = str(data.get("session_id") or "")
@@ -1167,6 +1381,12 @@ def handle_permission(hub: Hub, payload: dict) -> dict:
 
     hub.register(session_id)
 
+    if hub.driver_for(session_id) is not None:
+        # A driven child asks over its own wire (`can_use_tool`), which is the
+        # one path that holds for it. Passing here keeps one card per call.
+        hub.poke(session_id)
+        return {}
+
     pending = control.PendingCall(
         call_id=call_id,
         session_id=session_id,
@@ -1379,6 +1599,7 @@ def run(port: int | None = None, background: bool = False, open_browser: bool = 
         sys.stdout.write("\nscribe stopped\n")
     finally:
         stop_flag.set()
+        hub.stop_all_drivers()
         try:
             ctrl.shutdown()
             ctrl.server_close()
@@ -1499,9 +1720,10 @@ def print_status() -> int:
     messaging = cfg.get("messaging") or {}
     if messaging.get("enabled", True):
         reachable = len(peer.registry())
+        driving = (cfg.get("driver") or {}).get("enabled", True)
         print(
             f"messages    on  ({reachable} session{'s' if reachable != 1 else ''} with an inbox, "
-            f"resume {'on' if messaging.get('resume', True) else 'off'})"
+            f"driver {'on' if driving else 'off'})"
         )
     else:
         print("messages    off")

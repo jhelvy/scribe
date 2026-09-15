@@ -323,8 +323,15 @@ def turn_state(rows, cwd: str = "") -> dict:
     }
     rows = [r for r in rows if isinstance(r, dict)]
 
+    # The TUI writes a `permission-mode` row on every switch; a headless
+    # child does not, but stamps `permissionMode` on each user row instead.
+    # Newest of either wins.
     for row in reversed(rows):
-        if row.get("type") == "permission-mode" and row.get("permissionMode"):
+        kind = row.get("type")
+        if kind == "permission-mode" and row.get("permissionMode"):
+            state["mode"] = str(row["permissionMode"])
+            break
+        if kind == "user" and row.get("permissionMode") and not row.get("isSidechain"):
             state["mode"] = str(row["permissionMode"])
             break
 

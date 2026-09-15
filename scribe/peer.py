@@ -38,7 +38,6 @@ from __future__ import annotations
 import json
 import os
 import socket
-import subprocess
 import time
 import uuid as uuidlib
 from dataclasses import dataclass
@@ -260,11 +259,7 @@ def send(peer: Peer, text: str, timeout: float = REPLY_WAIT) -> dict:
     return result
 
 
-# ------------------------------------------------------------------ resume
-
-#: An upper bound on one resumed turn. Claude Code has no idle timeout of its
-#: own in print mode; a turn that runs this long is stuck.
-RESUME_TIMEOUT_S = 3600.0
+# ------------------------------------------------------------------ children
 
 
 def child_env() -> dict:
@@ -283,47 +278,3 @@ def child_env() -> dict:
     }
     env.pop("SCRIBE_DISABLE", None)
     return env
-
-
-def resume(session_id: str, cwd: str, text: str, timeout: float = RESUME_TIMEOUT_S) -> dict:
-    """Continue a session that has no process behind it.
-
-    Runs ``claude -p --resume <id>`` with the message on stdin, in the
-    session's own directory. Claude Code appends the prompt and everything that
-    follows to the same transcript under the same id, so the watcher sees the
-    turn exactly as it would see one typed in a terminal. Blocks until the turn
-    ends: call it on a thread.
-
-    Print mode never shows a permission dialog. A tool the session's settings
-    do not already allow is refused and Claude says so in its reply, which is
-    the honest outcome: nothing runs that the user did not already permit.
-    """
-    from .explain import find_claude
-
-    text = (text or "").strip()
-    if not text:
-        return {"ok": False, "error": "empty message"}
-    claude = find_claude()
-    if not claude:
-        return {"ok": False, "error": "claude is not on PATH"}
-    if cwd and not os.path.isdir(cwd):
-        return {"ok": False, "error": f"the session's directory is gone: {cwd}"}
-    argv = [claude, "-p", "--resume", session_id]
-    try:
-        proc = subprocess.run(
-            argv,
-            input=text,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=child_env(),
-            cwd=cwd or None,
-        )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "the turn did not finish in time"}
-    except OSError as exc:
-        return {"ok": False, "error": f"could not start claude: {exc}"}
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        return {"ok": False, "error": (detail[-1] if detail else f"claude exited {proc.returncode}")[:300]}
-    return {"ok": True, "reply": (proc.stdout or "").strip()[:2000]}
