@@ -72,6 +72,10 @@ DEFAULTS: dict[str, Any] = {
         "default_model": "",  # "" = the account default
         "allow_bypass": False,
     },
+    # Files attached to a message from the page, kept under ~/.scribe/uploads.
+    "uploads": {
+        "max_mb": 20,
+    },
     # Secret scrubbing applied to markdown and the viewer payload alike
     "redact": {
         "enabled": True,

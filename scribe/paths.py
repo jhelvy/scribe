@@ -13,6 +13,7 @@ off a working tree is the difference between a private archive and an accidental
       state/<session-id>.json      per-session sidecar (web messages, arm state)
       state/projects.json          cwd -> project-slug registry
       cache/explanations.json
+      uploads/<session-id>/<id>-<name>   files attached from the page
       run/control.sock  run/server.json  run/daemon.pid
 
 The Claude Code side is read-only to us: transcripts live in
@@ -72,6 +73,11 @@ def run_dir() -> Path:
     return root() / "run"
 
 
+def uploads_dir(session_id: str = "") -> Path:
+    base = root() / "uploads"
+    return base / safe_component(session_id) if session_id else base
+
+
 def control_socket() -> Path:
     from .sockpath import control_socket_path
 
@@ -99,7 +105,7 @@ def ensure_dirs() -> None:
     r = root()
     r.mkdir(parents=True, exist_ok=True)
     _chmod700(r)
-    for d in (logs_dir(), state_dir(), cache_dir(), run_dir()):
+    for d in (logs_dir(), state_dir(), cache_dir(), run_dir(), uploads_dir()):
         d.mkdir(parents=True, exist_ok=True)
         _chmod700(d)
 

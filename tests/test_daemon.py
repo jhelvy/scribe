@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import unittest
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -537,6 +538,20 @@ class TestInboxDelivery(DaemonHarness):
         reply = self.post("/api/message", {"session_id": "sess-1", "text": "now"})
         self.assertEqual(reply["via"], "queue")
 
+    def test_attachments_reach_a_terminal_session_by_path(self):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/upload?session_id=sess-1&name=shot.png",
+            data=bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"),
+            headers={"Content-Type": "image/png"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as r:
+            saved = json.loads(r.read().decode())
+        reply = self.post("/api/message", {"session_id": "sess-1", "text": "look", "attachments": [saved["id"]]})
+        self.assertEqual(reply["via"], "inbox")
+        self.assertTrue(self.inbox.got.wait(2))
+        self.assertIn("look\n\nAttached file: " + saved["path"], self.inbox.lines[1]["message"]["content"])
+
     def test_empty_and_unknown_are_refused(self):
         self.assertIn("error", self.post("/api/message", {"session_id": "sess-1", "text": "  "}))
         self.assertIn("error", self.post("/api/message", {"session_id": "nope", "text": "hi"}))
@@ -603,6 +618,15 @@ class TestDriverDelivery(DaemonHarness):
         self.assertEqual(caps["attachments"], "blocks")
         self.assertTrue(caps["mode"]["settable"])
         self.assertNotIn("bypassPermissions", caps["mode"]["choices"])
+
+    def test_a_fresh_transcript_without_hooks_still_offers_spawn(self):
+        # No hooks installed and the file just changed: the board guesses a
+        # process (live), but nothing can be reached, so the driver is offered.
+        os.utime(self.path, None)
+        self.hub.refresh_index(force=True)
+        card = self.card()
+        self.assertTrue(card["live"])
+        self.assertEqual(card["reply_via"], "spawn")
 
     def test_the_driver_can_be_turned_off(self):
         self.hub.cfg["driver"]["enabled"] = False
@@ -705,6 +729,57 @@ class TestDriverDelivery(DaemonHarness):
         self.hub.reap_drivers()
         self.assertIsNone(self.hub.driver_for("sess-1"))
         self.assertEqual(self.card()["reply_via"], "inbox")
+
+    def upload(self, name, data, mime, session_id="sess-1"):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/upload?session_id={session_id}&name={urllib.parse.quote(name)}",
+            data=data,
+            headers={"Content-Type": mime},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as r:
+                return json.loads(r.read().decode())
+        except urllib.error.HTTPError as exc:
+            with exc:
+                return json.loads(exc.read().decode())
+
+    PNG = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489")
+
+    def test_an_image_upload_travels_as_a_content_block(self):
+        saved = self.upload("shot.png", self.PNG, "image/png")
+        self.assertTrue(saved["image"])
+        self.assertEqual(saved["mime"], "image/png")
+        self.assertTrue(saved["path"].startswith(str(paths.uploads_dir("sess-1"))))
+        self.assertTrue(os.path.exists(saved["path"]))
+        reply = self.post("/api/message", {"session_id": "sess-1", "text": "", "attachments": [saved["id"]]})
+        self.assertEqual(reply["via"], "driver")
+        self.assertTrue(self.wait_idle())
+        turn = self.fake_log_rows("user")[0]
+        self.assertEqual(turn["images"], 1)
+        self.assertNotIn("Attached file", turn["text"])
+
+    def test_the_browser_is_not_trusted_about_image_types(self):
+        saved = self.upload("shot.png", b"not really a png", "image/png")
+        self.assertFalse(saved["image"])
+        self.assertEqual(saved["mime"], "image/png")  # what it said; `image` is what we checked
+
+    def test_other_files_are_named_by_path(self):
+        saved = self.upload("notes.txt", b"hello", "text/plain")
+        self.assertFalse(saved["image"])
+        self.post("/api/message", {"session_id": "sess-1", "text": "read this", "attachments": [saved["id"]]})
+        self.assertTrue(self.wait_idle())
+        turn = self.fake_log_rows("user")[0]
+        self.assertEqual(turn["images"], 0)
+        self.assertIn("read this\n\nAttached file: " + saved["path"], turn["text"])
+
+    def test_upload_names_cannot_escape_and_size_is_capped(self):
+        saved = self.upload("../../evil.sh", b"x", "text/plain")
+        self.assertTrue(saved["path"].startswith(str(paths.uploads_dir("sess-1"))))
+        self.assertNotIn("/", saved["name"])
+        self.hub.cfg["uploads"]["max_mb"] = 0.00001
+        self.assertIn("error", self.upload("big.bin", b"x" * 100, "application/octet-stream"))
+        self.assertIn("error", self.post("/api/message", {"session_id": "sess-1", "text": "", "attachments": ["nope"]}))
 
     def test_a_child_that_dies_leaves_the_session_done(self):
         self.post("/api/message", {"session_id": "sess-1", "text": "DIE"})

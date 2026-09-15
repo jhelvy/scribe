@@ -937,21 +937,133 @@ pre.code.err { color: var(--del); background: var(--del-bg); border-color: color
 }
 .dock-inner { max-width: calc(var(--measure) + var(--rail-w) + 2.25rem); }
 
-.compose { display: flex; gap: 0.4rem; align-items: flex-end; }
-.compose textarea {
-  flex: 1;
-  resize: none;
-  min-height: 2.1rem;
-  max-height: 9rem;
-  padding: 0.45rem 0.6rem;
+.compose {
+  display: flex;
+  flex-direction: column;
   background: var(--paper-2);
   border: 1px solid var(--rule);
   border-radius: var(--radius-lg);
+  transition: border-color 120ms var(--ease), box-shadow 120ms var(--ease);
+}
+.compose:focus-within {
+  border-color: color-mix(in oklch, var(--ember) 45%, var(--rule));
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--ember) 12%, transparent);
+}
+.dock[data-drop="true"] .compose {
+  border-style: dashed;
+  border-color: var(--ember);
+  background: var(--ember-soft);
+}
+.compose[data-sending="true"] { opacity: 0.7; }
+.compose textarea {
+  resize: none;
+  min-height: 2.1rem;
+  max-height: 9rem;
+  padding: 0.5rem 0.65rem 0.3rem;
+  background: transparent;
+  border: 0;
+  outline: 0;
   font-family: var(--mono);
   font-size: 0.75rem;
   line-height: 1.5;
 }
 .compose textarea::placeholder { color: var(--ink-3); }
+
+.compose-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.4rem 0.4rem;
+}
+.btn.ghost { background: transparent; border-color: transparent; color: var(--ink-3); }
+.btn.ghost:hover:not(:disabled) { background: var(--paper-3); color: var(--ink); }
+.btn.ghost:disabled { cursor: default; opacity: 0.85; }
+.btn.picker .caret { font-size: 0.55rem; opacity: 0.7; }
+.btn.picker:disabled .caret { display: none; }
+#attach-btn { font-size: 0.9rem; line-height: 1; padding: 0.15rem 0.45rem; }
+#stop-btn { color: var(--danger); }
+.channel {
+  font-family: var(--mono);
+  font-size: 0.5625rem;
+  letter-spacing: 0.05em;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.channel[data-via="driver"]::before, .channel[data-via="inbox"]::before {
+  content: "";
+  display: inline-block;
+  width: 0.4rem; height: 0.4rem;
+  border-radius: 50%;
+  margin-right: 0.3rem;
+  background: var(--add);
+  vertical-align: middle;
+}
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.45rem 0.5rem 0;
+}
+.attachments[hidden] { display: none; }
+.attachment {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 14rem;
+  padding: 0.2rem 0.35rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper);
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  color: var(--ink-2);
+}
+.attachment.pending { opacity: 0.55; }
+.attachment img { width: 2.4rem; height: 2.4rem; object-fit: cover; border-radius: 2px; }
+.attachment-icon { color: var(--ink-3); }
+.attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-remove {
+  border: 0; background: transparent; color: var(--ink-3);
+  font-size: 0.8rem; line-height: 1; padding: 0 0.1rem; cursor: pointer;
+}
+.attachment-remove:hover { color: var(--danger); }
+
+/* the composer's menus: anchored above their button, in front of the dock */
+.popover {
+  position: fixed;
+  z-index: 40;
+  width: min(22rem, calc(100vw - 1rem));
+  max-height: 18rem;
+  overflow-y: auto;
+  padding: 0.25rem;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+}
+.popover-item {
+  padding: 0.35rem 0.5rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.popover-item.active { background: var(--paper-3); }
+.popover-item.disabled { opacity: 0.5; cursor: not-allowed; }
+.popover-head { display: flex; align-items: baseline; gap: 0.4rem; }
+.popover-label { font-family: var(--mono); font-size: 0.6875rem; color: var(--ink); }
+.popover-hint { font-family: var(--mono); font-size: 0.6rem; color: var(--ink-3); }
+.popover-head .chip { margin-left: auto; }
+.popover-detail {
+  margin-top: 0.1rem;
+  font-family: var(--serif);
+  font-size: 0.75rem;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.popover-empty { padding: 0.4rem 0.5rem; font-family: var(--mono); font-size: 0.625rem; color: var(--ink-3); }
 
 .queue { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 0.4rem; }
 .queued {

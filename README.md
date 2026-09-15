@@ -259,6 +259,18 @@ rather than refused. The board's *done* strip offers *continue* for these.
 If you open the same session in a terminal, scribe retires its child after the
 current turn so two processes never write one transcript.
 
+**Attachments.** The `+` button, a paste, or a drop onto the compose box
+attaches files; they are kept under `~/.scribe/uploads/<session>/` and never
+enter a repository. On a page-driven session an image goes to Claude as an
+image (it sees the picture); anything else, and everything on a terminal
+session, is named by path so Claude reads it with its own tools. `uploads.max_mb`
+caps the size.
+
+**Mode and model.** On a page-driven session the two chips under the compose
+box switch the permission mode (`Shift+Tab` cycles, like the terminal) and the
+model; on a terminal session they show what the transcript says and point you
+at the terminal. `Esc` while Claude is working stops the turn.
+
 **A running session without an inbox** (an older Claude Code, or messaging
 turned off there) falls back to the Stop-hook queue below when that is enabled.
 
@@ -322,6 +334,7 @@ it is why the blanket claim at the top of this file is about recording.
 | `driver.idle_min` | `30` | close that child after this many idle minutes |
 | `driver.default_mode` | `""` | permission mode for a started session (`""` = Claude Code's `permissions.defaultMode`) |
 | `driver.allow_bypass` | `false` | offer `bypassPermissions` on the page |
+| `uploads.max_mb` | `20` | largest file the compose box accepts |
 | `remote_approval.enabled` | `false` | approve from the browser |
 | `reply_queue.enabled` | `false` | Stop-hook replies, for sessions without an inbox |
 | `redact.enabled` | `true` | scrub secrets |

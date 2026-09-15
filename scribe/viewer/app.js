@@ -46,6 +46,9 @@
     doneOpen: false,    // the board's done column, expanded or a strip
     boardTick: null,
     cfg: {},
+    attachments: [],    // {id, name, mime, image, url, pending}
+    compose: { mode: "", model: "" },  // picks for a session that has no process yet
+    popover: null,
   };
 
   /* ----------------------------------------------------------------- utils */
@@ -965,6 +968,9 @@
     if (!id) return;
     if (id === state.sessionId && state.view !== "board") return;
     leaveBoard();
+    closePopover();
+    clearAttachments();
+    state.compose = { mode: "", model: "" };
     state.sessionId = id;
     location.hash = "#/s/" + id;
     resetView();
@@ -1366,6 +1372,7 @@
     dock.dataset.via = via;
     var input = $("compose-input");
     input.placeholder = DOCK_HINT[via] || "";
+    applyCaps(head);
     renderQueue(head.queued || []);
     var note = "";
     if (via === "inbox" && head.inbox_held) {
@@ -1477,6 +1484,337 @@
     toast(pending.tool_name + " needs approval");
   }
 
+
+  /* -------------------------------------------------------------- composer */
+
+  // One popover for every menu the composer opens: the mode and model
+  // pickers, and (later) the slash-command and @-file lists. Anchored above
+  // its button because the dock sits at the bottom of the page. Keyboard:
+  // ↑↓ move, Enter/Tab pick, Esc close; clicking elsewhere closes.
+  function openPopover(opts) {
+    closePopover();
+    var node = el("div", "popover");
+    node.setAttribute("role", "listbox");
+    if (opts.cls) node.classList.add(opts.cls);
+    var handle = { node: node, items: [], index: -1, opts: opts };
+
+    function render() {
+      clear(node);
+      if (!handle.items.length) {
+        node.appendChild(el("div", "popover-empty", opts.empty || "nothing matches"));
+        return;
+      }
+      handle.items.forEach(function (item, i) {
+        var row = el("div", "popover-item" + (item.disabled ? " disabled" : "") + (i === handle.index ? " active" : ""));
+        row.setAttribute("role", "option");
+        row.dataset.index = String(i);
+        var head = el("div", "popover-head");
+        head.appendChild(el("span", "popover-label", item.label));
+        if (item.hint) head.appendChild(el("span", "popover-hint", item.hint));
+        if (item.tag) head.appendChild(el("span", "chip", item.tag));
+        row.appendChild(head);
+        if (item.detail) row.appendChild(el("div", "popover-detail", item.detail));
+        row.addEventListener("mousedown", function (ev) { ev.preventDefault(); });
+        row.addEventListener("click", function () { handle.pick(i); });
+        node.appendChild(row);
+      });
+      var active = node.querySelector(".popover-item.active");
+      if (active) active.scrollIntoView({ block: "nearest" });
+    }
+
+    handle.update = function (items) {
+      handle.items = items || [];
+      var firstEnabled = handle.items.findIndex(function (it) { return !it.disabled; });
+      handle.index = firstEnabled;
+      render();
+    };
+    handle.move = function (delta) {
+      var n = handle.items.length;
+      if (!n) return;
+      var i = handle.index;
+      for (var tries = 0; tries < n; tries++) {
+        i = Compose.step(i, delta, n);
+        if (!handle.items[i].disabled) break;
+      }
+      handle.index = i;
+      render();
+    };
+    handle.pick = function (i) {
+      var item = handle.items[i == null ? handle.index : i];
+      if (!item || item.disabled) {
+        if (item && item.disabled && item.why) toast(item.why);
+        return;
+      }
+      closePopover();
+      opts.onPick(item);
+    };
+    handle.close = function () {
+      if (state.popover !== handle) return;
+      state.popover = null;
+      node.remove();
+      document.removeEventListener("mousedown", onOutside, true);
+      if (opts.onClose) opts.onClose();
+    };
+    function onOutside(ev) {
+      if (!node.contains(ev.target) && !(opts.anchor && opts.anchor.contains(ev.target))) handle.close();
+    }
+
+    document.body.appendChild(node);
+    var box = (opts.anchor || $("compose")).getBoundingClientRect();
+    node.style.left = Math.max(8, Math.min(box.left, window.innerWidth - 8 - 360)) + "px";
+    node.style.bottom = (window.innerHeight - box.top + 6) + "px";
+    document.addEventListener("mousedown", onOutside, true);
+    state.popover = handle;
+    handle.update(opts.items || []);
+    return handle;
+  }
+
+  function closePopover() {
+    if (state.popover) state.popover.close();
+  }
+
+  var MODE_LABEL = {
+    "default": "manual",
+    acceptEdits: "accept edits",
+    plan: "plan",
+    auto: "auto",
+    bypassPermissions: "bypass",
+    dontAsk: "don't ask",
+  };
+  var MODE_DETAIL = {
+    "default": "asks before each tool that needs permission",
+    acceptEdits: "file edits go through; commands still ask",
+    plan: "reads and plans; writes nothing until the plan is approved",
+    auto: "Claude Code decides what is safe to run",
+    bypassPermissions: "nothing asks; nothing is held",
+  };
+  var MODEL_DETAIL = {
+    "default": "whatever this account uses by default",
+    fable: "Fable 5.1 — the most capable",
+    opus: "Opus 5",
+    sonnet: "Sonnet 5",
+    haiku: "Haiku 4.5 — fastest and cheapest",
+  };
+
+  function modeLabel(value) { return MODE_LABEL[value] || value || "mode"; }
+
+  function modelLabel(value) {
+    if (!value || value === "default") return "default";
+    var family = /fable|opus|sonnet|haiku/.exec(value);
+    if (!family) return value;
+    var version = /-(\d+)-(\d+)/.exec(value);
+    return family[0] + (version ? " " + version[1] + "." + version[2] : "");
+  }
+
+  // What the composer offers is `head.caps`, decided by the daemon per
+  // channel. The page only draws it — and remembers a pick for a session
+  // that has no process yet, to send along with the first message.
+  function applyCaps(head) {
+    var caps = head.caps || {};
+    var via = head.reply_via || "";
+    var mode = caps.mode || {};
+    var model = caps.model || {};
+    var modeValue = (via === "spawn" && state.compose.mode) || mode.value || "";
+    var modelValue = (via === "spawn" && state.compose.model) || model.value || "";
+
+    var modeBtn = $("mode-btn");
+    $("mode-label").textContent = modeLabel(modeValue);
+    modeBtn.disabled = !mode.settable;
+    modeBtn.dataset.value = modeValue;
+    modeBtn.title = mode.settable ? "Permission mode (Shift+Tab cycles)" : "Permission mode — change it in the terminal";
+
+    var modelBtn = $("model-btn");
+    $("model-label").textContent = modelLabel(modelValue);
+    modelBtn.disabled = !model.settable;
+    modelBtn.title = model.settable ? "Model" : "Model — change it in the terminal";
+
+    $("attach-btn").hidden = !caps.attachments || caps.attachments === "none";
+    $("attach-btn").title = caps.attachments === "blocks"
+      ? "Attach files (or paste, or drop them here) — images are shown to Claude"
+      : "Attach files (or paste, or drop them here) — Claude reads them by path";
+
+    var running = !!(head.driver && head.driver.state === "running");
+    $("stop-btn").hidden = !(caps.interrupt && running);
+
+    var channel = $("channel");
+    var text = { driver: "page session", inbox: "terminal session", queue: "via stop hook", spawn: "starts Claude here" }[via] || "";
+    channel.textContent = text;
+    channel.dataset.via = via;
+    channel.title = { driver: "a Claude process of scribe's own is behind this session",
+                      inbox: "a terminal session with an inbox: messages go straight in",
+                      queue: "delivered through the Stop hook when this turn ends",
+                      spawn: "no process yet — the first message starts one in the session's folder" }[via] || "";
+  }
+
+  function pickMode() {
+    var caps = state.head.caps || {};
+    var mode = caps.mode || {};
+    if (!mode.settable) return;
+    var current = $("mode-btn").dataset.value;
+    openPopover({
+      anchor: $("mode-btn"),
+      cls: "menu",
+      items: (mode.choices || []).map(function (value) {
+        return { label: modeLabel(value), detail: MODE_DETAIL[value] || "", value: value, tag: value === current ? "current" : "" };
+      }),
+      onPick: function (item) { setMode(item.value); },
+    });
+  }
+
+  function cycleMode() {
+    var caps = state.head.caps || {};
+    var mode = caps.mode || {};
+    if (!mode.settable || !(mode.choices || []).length) return;
+    var choices = mode.choices;
+    var i = choices.indexOf($("mode-btn").dataset.value);
+    setMode(choices[(i + 1) % choices.length]);
+  }
+
+  function setMode(value) {
+    if (state.head.reply_via === "spawn") {
+      state.compose.mode = value;
+      applyCaps(state.head);
+      return;
+    }
+    api("/api/session/mode", { session_id: state.sessionId, mode: value }).then(function (r) {
+      if (r.error) return toast(r.error);
+      $("mode-label").textContent = modeLabel(r.mode || value);
+      $("mode-btn").dataset.value = r.mode || value;
+      toast("mode: " + modeLabel(r.mode || value));
+    });
+  }
+
+  function pickModel() {
+    var caps = state.head.caps || {};
+    var model = caps.model || {};
+    if (!model.settable) return;
+    var current = modelLabel($("model-label").textContent);
+    openPopover({
+      anchor: $("model-btn"),
+      cls: "menu",
+      items: (model.choices || []).map(function (value) {
+        return { label: value, detail: MODEL_DETAIL[value] || "", value: value, tag: modelLabel(value) === current || value === current ? "current" : "" };
+      }),
+      onPick: function (item) { setModel(item.value); },
+    });
+  }
+
+  function setModel(value) {
+    if (state.head.reply_via === "spawn") {
+      state.compose.model = value;
+      applyCaps(state.head);
+      return;
+    }
+    api("/api/session/model", { session_id: state.sessionId, model: value }).then(function (r) {
+      if (r.error) return toast(r.error);
+      $("model-label").textContent = modelLabel(value);
+      toast("model: " + modelLabel(value));
+    });
+  }
+
+  function stopTurn() {
+    if ($("stop-btn").hidden) return;
+    api("/api/interrupt", { session_id: state.sessionId }).then(function (r) {
+      if (r.error) return toast(r.error);
+      toast("stopped");
+    });
+  }
+
+  // -- attachments --------------------------------------------------------
+
+  function attachFiles(files) {
+    Array.from(files || []).forEach(function (file) {
+      var entry = { id: null, name: file.name || "pasted", mime: file.type || "", image: /^image\//.test(file.type || ""), url: null, pending: true };
+      if (entry.image) { try { entry.url = URL.createObjectURL(file); } catch (e) {} }
+      state.attachments.push(entry);
+      renderAttachments();
+      fetch("/api/upload?session_id=" + encodeURIComponent(state.sessionId || "new") + "&name=" + encodeURIComponent(entry.name), {
+        method: "POST",
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+        body: file,
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (r) {
+          if (r.error) { dropAttachment(entry); return toast(r.error); }
+          entry.id = r.id;
+          entry.name = r.name;
+          entry.image = !!r.image;
+          entry.pending = false;
+          renderAttachments();
+        })
+        .catch(function () { dropAttachment(entry); toast("upload failed"); });
+    });
+  }
+
+  function dropAttachment(entry) {
+    var i = state.attachments.indexOf(entry);
+    if (i >= 0) state.attachments.splice(i, 1);
+    if (entry.url) { try { URL.revokeObjectURL(entry.url); } catch (e) {} }
+    renderAttachments();
+  }
+
+  function clearAttachments() {
+    state.attachments.slice().forEach(dropAttachment);
+  }
+
+  function renderAttachments() {
+    var strip = $("attachments");
+    clear(strip);
+    strip.hidden = !state.attachments.length;
+    state.attachments.forEach(function (entry) {
+      var item = el("div", "attachment" + (entry.pending ? " pending" : ""));
+      if (entry.image && entry.url) {
+        var img = document.createElement("img");
+        img.src = entry.url;
+        img.alt = entry.name;
+        item.appendChild(img);
+      } else {
+        item.appendChild(el("span", "attachment-icon", "▤"));
+      }
+      item.appendChild(el("span", "attachment-name", entry.name));
+      var remove = el("button", "attachment-remove", "×");
+      remove.type = "button";
+      remove.title = "remove";
+      remove.addEventListener("click", function () { dropAttachment(entry); });
+      item.appendChild(remove);
+      strip.appendChild(item);
+    });
+  }
+
+  function bindComposer() {
+    $("attach-btn").addEventListener("click", function () { $("file-input").click(); });
+    $("file-input").addEventListener("change", function (ev) {
+      attachFiles(ev.target.files);
+      ev.target.value = "";
+    });
+    $("mode-btn").addEventListener("click", pickMode);
+    $("model-btn").addEventListener("click", pickModel);
+    $("stop-btn").addEventListener("click", stopTurn);
+
+    var input = $("compose-input");
+    input.addEventListener("paste", function (ev) {
+      var files = ev.clipboardData && ev.clipboardData.files;
+      if (files && files.length) { ev.preventDefault(); attachFiles(files); }
+    });
+    var dock = $("dock");
+    ["dragenter", "dragover"].forEach(function (name) {
+      dock.addEventListener(name, function (ev) {
+        if (!ev.dataTransfer || !Array.from(ev.dataTransfer.types || []).includes("Files")) return;
+        ev.preventDefault();
+        dock.dataset.drop = "true";
+      });
+    });
+    dock.addEventListener("dragleave", function (ev) {
+      if (!dock.contains(ev.relatedTarget)) dock.dataset.drop = "false";
+    });
+    dock.addEventListener("drop", function (ev) {
+      dock.dataset.drop = "false";
+      if (!ev.dataTransfer || !ev.dataTransfer.files.length) return;
+      ev.preventDefault();
+      attachFiles(ev.dataTransfer.files);
+    });
+  }
+
   /* --------------------------------------------------------------- controls */
 
   function bind() {
@@ -1566,8 +1904,21 @@
       ev.preventDefault();
       sendReply();
     });
+    bindComposer();
     $("compose-input").addEventListener("keydown", function (ev) {
-      if (ev.key === "Escape") { ev.target.blur(); return; }
+      var pop = state.popover;
+      if (pop) {
+        if (ev.key === "ArrowDown") { ev.preventDefault(); pop.move(1); return; }
+        if (ev.key === "ArrowUp") { ev.preventDefault(); pop.move(-1); return; }
+        if (ev.key === "Enter" || ev.key === "Tab") { if (!ev.isComposing) { ev.preventDefault(); pop.pick(); } return; }
+        if (ev.key === "Escape") { ev.preventDefault(); closePopover(); return; }
+      }
+      if (ev.key === "Tab" && ev.shiftKey) { ev.preventDefault(); cycleMode(); return; }
+      if (ev.key === "Escape") {
+        if (!$("stop-btn").hidden) stopTurn();
+        else ev.target.blur();
+        return;
+      }
       if (Compose.shouldSend(ev)) { ev.preventDefault(); sendReply(); }
     });
     $("compose-input").addEventListener("input", function (ev) {
@@ -1623,16 +1974,24 @@
   function sendReply() {
     var input = $("compose-input");
     var text = input.value.trim();
-    if (!text || $("compose").dataset.sending === "true") return;
+    var ready = state.attachments.filter(function (a) { return a.id; });
+    if ((!text && !ready.length) || $("compose").dataset.sending === "true") return;
+    if (state.attachments.some(function (a) { return a.pending; })) return toast("still uploading…");
+    var body = { session_id: state.sessionId, text: text, attachments: ready.map(function (a) { return a.id; }) };
+    if (state.head.reply_via === "spawn") {
+      if (state.compose.mode) body.mode = state.compose.mode;
+      if (state.compose.model) body.model = state.compose.model;
+    }
     // The text stays in the box until the daemon has it, so a refused or
     // failed send costs nothing but a toast.
     setSending(true);
-    api("/api/message", { session_id: state.sessionId, text: text }).then(function (r) {
+    api("/api/message", body).then(function (r) {
       setSending(false);
       if (r.error) { input.focus(); return toast(r.error); }
       input.value = "";
       autogrow(input);
       saveDraft("");
+      clearAttachments();
       input.focus();
       if (r.via === "inbox") onDelivery({ status: "delivered", via: "inbox", held: r.held });
       if (r.via === "driver" && r.queued) toast("queued — sent when this turn ends");

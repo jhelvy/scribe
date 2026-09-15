@@ -212,6 +212,20 @@ between turns, closed after `driver.idle_min`. Its docstring records what
   session, `reap_drivers` stops the child once idle and the channel flips to
   `inbox`.
 
+**Uploads are files first.** `Hub.save_upload` writes to
+`~/.scribe/uploads/<session>/<id>-<name>` and the id is resolved by scanning
+that directory, so a daemon restart forgets nothing. The browser's
+`Content-Type` is recorded but the `image` flag comes from the bytes
+(`sniff_image`): only a real PNG/JPEG/GIF/WebP becomes a content block. The
+page shows thumbnails through `blob:` URLs, which is why `img-src` allows
+`blob:`.
+
+**A fresh mtime is not a reason to hide the composer.** `presence_kind` ranks
+what says a process exists (driver, inbox, hook, mtime). The board keeps
+treating a recent file as live, but `reply_via` offers `spawn` when the only
+evidence is the mtime: an interactive Claude Code always has an inbox, so a
+recent file with none is a session that just ended.
+
 `tests/fake_claude.py` speaks the same wire and writes real transcript rows,
 so `test_driver.py` and `TestDriverDelivery` run without Claude. Point
 `SCRIBE_CLAUDE` at any binary to drive something else.

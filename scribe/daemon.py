@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -66,6 +67,24 @@ LIVE_S = 2 * 3600
 LIVE_GRACE_S = 600
 #: How long the session-inbox registry is trusted before it is re-read.
 PEERS_TTL_S = 2.0
+
+_IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def sniff_image(data: bytes) -> str:
+    """The image type by its first bytes, or "". The browser's claim is not
+    trusted for the one decision that matters: whether the model sees it."""
+    for magic, mime in _IMAGE_MAGIC:
+        if data.startswith(magic):
+            return mime
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
 
 
 # ==================================================================== hub
@@ -288,18 +307,26 @@ class Hub:
     # -- the board ------------------------------------------------------
 
     def is_live(self, ref: transcript.SessionRef, now: float | None = None) -> bool:
+        return bool(self.presence_kind(ref, now))
+
+    def presence_kind(self, ref: transcript.SessionRef, now: float | None = None) -> str:
+        """What says a process is behind this session, strongest first:
+        ``driver`` (our child), ``inbox`` (the registry), ``hook`` (a recent
+        hook), ``mtime`` (a fresh transcript and nothing else), or ``""``."""
         now = now or time.time()
         sid = ref.session_id
         # A session with an inbox has a process behind it by definition, and a
         # driver child is one too. Both are known without any hook.
-        if self.driver_for(sid) is not None or sid in self.peers():
-            return True
+        if self.driver_for(sid) is not None:
+            return "driver"
+        if sid in self.peers():
+            return "inbox"
         if sid in self.ended:
-            return False
+            return ""
         seen = self.presence.get(sid)
         if seen is not None:
-            return now - seen < LIVE_S
-        return now - ref.mtime < LIVE_GRACE_S
+            return "hook" if now - seen < LIVE_S else ""
+        return "mtime" if now - ref.mtime < LIVE_GRACE_S else ""
 
     def card_for(self, ref: transcript.SessionRef) -> dict:
         """One session as the board sees it.
@@ -523,7 +550,8 @@ class Hub:
         mode = (drv.mode if drv is not None else "") or (state or {}).get("mode") or ""
         if via == "spawn" and not mode:
             mode = self.default_mode()
-        model = (drv.caps.model if drv is not None else "") or (models[-1] if models else "")
+        real = [m for m in models if isinstance(m, str) and m.startswith("claude")]
+        model = (drv.caps.model if drv is not None else "") or (real[-1] if real else "")
         settable = via in ("driver", "spawn")
         return {
             "attachments": "blocks" if settable else ("paths" if via in ("inbox", "queue") else "none"),
@@ -602,8 +630,13 @@ class Hub:
             return "inbox"
         if alive and queue_on:
             return "queue"
+        # A fresh mtime alone is a guess at a process (kept for the board,
+        # where a wrong "done" is the worse error). For sending it is not
+        # enough to hide the composer: an interactive Claude Code always has
+        # an inbox, so "recent file, no inbox, no hook" is almost always a
+        # session that just ended, and the driver may take it.
         if (
-            not alive
+            self.presence_kind(ref) in ("", "mtime")
             and (self.cfg.get("driver") or {}).get("enabled", True)
             and not ref.archived
             and ref.cwd
@@ -779,6 +812,89 @@ class Hub:
         if pending.decided_by == "timeout":
             return {"behavior": "deny", "message": f"scribe: nobody answered within {wait_s:.0f}s"}
         return {"behavior": "deny", "message": "scribe: denied from the page"}
+
+    # -- attachments ------------------------------------------------------
+
+    def save_upload(self, session_id: str, name: str, mime: str, data: bytes) -> dict:
+        """Keep a file attached from the page under ~/.scribe/uploads.
+
+        The id is the file's own prefix, so a restart loses nothing: an id is
+        resolved by looking for it on disk, not in memory.
+        """
+        folder = paths.uploads_dir(session_id or "new")
+        folder.mkdir(parents=True, exist_ok=True)
+        upload_id = uuid.uuid4().hex[:12]
+        safe = paths.safe_component(name or "file")
+        target = folder / f"{upload_id}-{safe}"
+        sniffed = sniff_image(data)
+        mime = sniffed or (mime or "application/octet-stream").split(";")[0].strip().lower()
+        with open(target, "wb") as fh:
+            fh.write(data)
+        os.chmod(target, 0o600)
+        return {
+            "id": upload_id,
+            "path": str(target),
+            "name": safe,
+            "size": len(data),
+            "mime": mime,
+            # Only bytes that really are an image go to the model as one.
+            "image": bool(sniffed),
+        }
+
+    def find_upload(self, session_id: str, upload_id: str) -> dict | None:
+        upload_id = paths.safe_component(upload_id)
+        for folder in (paths.uploads_dir(session_id or "new"), paths.uploads_dir("new")):
+            if not folder.is_dir():
+                continue
+            for entry in folder.iterdir():
+                if entry.name.startswith(upload_id + "-") and entry.is_file():
+                    with open(entry, "rb") as fh:
+                        head = fh.read(16)
+                    mime = sniff_image(head) or "application/octet-stream"
+                    return {
+                        "id": upload_id,
+                        "path": str(entry),
+                        "name": entry.name[len(upload_id) + 1 :],
+                        "size": entry.stat().st_size,
+                        "mime": mime,
+                        "image": mime in driver.IMAGE_TYPES,
+                    }
+        return None
+
+    def rehome_uploads(self, session_id: str) -> None:
+        """Move files uploaded before a session had an id under that id."""
+        source = paths.uploads_dir("new")
+        if not source.is_dir() or not session_id:
+            return
+        target = paths.uploads_dir(session_id)
+        target.mkdir(parents=True, exist_ok=True)
+        for entry in list(source.iterdir()):
+            try:
+                os.replace(entry, target / entry.name)
+            except OSError:
+                pass
+
+    def with_attachments(self, session_id: str, text: str, ids: list, as_blocks: bool) -> tuple[str, list[dict]]:
+        """Fold attachments into a message for a given channel.
+
+        A driver takes images as content blocks (the model sees the picture);
+        everything else, and everything on the inbox channel, is named by path
+        so Claude can read it with its own tools.
+        """
+        images: list[dict] = []
+        lines: list[str] = []
+        for upload_id in ids or []:
+            found = self.find_upload(session_id, str(upload_id))
+            if found is None:
+                continue
+            block = driver.image_block(found["path"], found["mime"]) if as_blocks and found["image"] else None
+            if block is not None:
+                images.append(block)
+            else:
+                lines.append(f"Attached file: {found['path']}")
+        if lines:
+            text = (text.rstrip() + "\n\n" if text.strip() else "") + "\n".join(lines)
+        return text, images
 
     def send_to_inbox(self, session_id: str, text: str) -> dict:
         target = self.peers(force=True).get(session_id)
@@ -969,7 +1085,7 @@ class Handler(BaseHTTPRequestHandler):
     # file instead of an inline <script>.
     CSP = (
         "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; font-src 'self'; connect-src 'self'; "
+        "img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; "
         "form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
     )
 
@@ -1006,6 +1122,21 @@ class Handler(BaseHTTPRequestHandler):
             return json.loads(self.rfile.read(length).decode("utf-8")) or {}
         except (ValueError, OSError):
             return {}
+
+    def _raw_body(self, limit: int) -> bytes | None:
+        """The body as bytes, or None when it is over ``limit``."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return b""
+        if length > limit:
+            return None
+        if length <= 0:
+            return b""
+        try:
+            return self.rfile.read(length)
+        except OSError:
+            return b""
 
     def _guard(self) -> bool:
         """Reject cross-origin and DNS-rebinding attempts.
@@ -1073,7 +1204,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._guard():
             return
-        route = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        route = parsed.path
+
+        if route == "/api/upload":
+            # A raw body, not JSON: the file is the body, the name is in the
+            # query, and the browser's Content-Type says what it thinks it is.
+            query = parse_qs(parsed.query)
+            session_id = (query.get("session_id") or [""])[0]
+            name = (query.get("name") or ["file"])[0]
+            limit = int(float((self.hub.cfg.get("uploads") or {}).get("max_mb", 20)) * 1024 * 1024)
+            data = self._raw_body(limit)
+            if data is None:
+                return self._json({"error": f"the file is larger than {limit // (1024 * 1024)} MB"}, 413)
+            if not data:
+                return self._json({"error": "empty upload"}, 400)
+            saved = self.hub.save_upload(session_id, name, self.headers.get("Content-Type") or "", data)
+            return self._json(saved)
+
         data = self._body()
 
         if route == "/api/decision":
@@ -1094,12 +1242,16 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/message":
             session_id = str(data.get("session_id") or "")
             text = str(data.get("text") or "").strip()
-            if not text:
+            ids = [str(x) for x in (data.get("attachments") or []) if x]
+            if not text and not ids:
                 return self._json({"error": "empty message"}, 400)
             ref = self.hub.ref_for(session_id)
             via = self.hub.reply_via(ref, self.hub.is_live(ref) if ref else False)
             if ref is None and not via:
                 return self._json({"error": "no such session"}, 404)
+            text, images = self.hub.with_attachments(session_id, text, ids, as_blocks=via in ("driver", "spawn"))
+            if not text and not images:
+                return self._json({"error": "the attachments could not be found"}, 400)
             if via == "inbox":
                 result = self.hub.send_to_inbox(session_id, text)
                 return self._json(result, 200 if result.get("ok") else 502)
@@ -1114,6 +1266,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.hub.deliver_to_driver(
                     ref,
                     text,
+                    images=images,
                     mode=str(data.get("mode") or ""),
                     model=str(data.get("model") or ""),
                 )

@@ -65,13 +65,27 @@
           <div class="dock-inner">
             <div class="queue" id="queue"></div>
             <form class="compose" id="compose">
+              <div class="attachments" id="attachments"></div>
               <textarea
                 id="compose-input"
                 rows="1"
                 placeholder="message this session…"
                 spellcheck="true"
               ></textarea>
-              <button class="btn" type="submit" id="compose-send" title="Send (Enter). Shift+Enter for a new line">send</button>
+              <div class="compose-bar">
+                <button class="btn ghost" type="button" id="attach-btn" title="Attach files (or paste, or drop them here)">+</button>
+                <button class="btn ghost picker" type="button" id="mode-btn" title="Permission mode (Shift+Tab cycles)">
+                  <span id="mode-label">mode</span><span class="caret">▾</span>
+                </button>
+                <button class="btn ghost picker" type="button" id="model-btn" title="Model">
+                  <span id="model-label">model</span><span class="caret">▾</span>
+                </button>
+                <span class="spacer"></span>
+                <span class="channel" id="channel"></span>
+                <button class="btn ghost" type="button" id="stop-btn" title="Stop this turn (Esc)" hidden>■ stop</button>
+                <button class="btn" type="submit" id="compose-send" title="Send (Enter). Shift+Enter for a new line">send ⏎</button>
+              </div>
+              <input type="file" id="file-input" multiple hidden />
             </form>
             <div class="dock-note" id="dock-note"></div>
           </div>
