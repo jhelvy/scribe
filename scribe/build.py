@@ -630,6 +630,10 @@ def _handle_assistant(builder: _RoundBuilder, row: dict, ts: str, session: Sessi
     session.usage.add(usage)
     rnd = builder.ensure_round(ts)
     rnd.usage.add(usage)
+    if usage.total:
+        key = str(model or "unknown")
+        rnd.usage_by_model[key] = rnd.usage_by_model.get(key, 0) + usage.total
+        session.usage_by_model[key] = session.usage_by_model.get(key, 0) + usage.total
 
     for block in _blocks(row):
         if not isinstance(block, dict):

@@ -16,15 +16,17 @@ snippets lose their context.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import threading
 import time
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from . import paths
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Bounded so a single `cat` of a large file cannot dominate the index. The
 # markdown renderer uses the same ceiling for the same reason.
@@ -95,7 +97,7 @@ class SearchIndex:
             if version and version != SCHEMA_VERSION:
                 # The index is derived data; rebuilding is always safe and
                 # cheaper than migrating.
-                conn.executescript("DROP TABLE IF EXISTS docs; DROP TABLE IF EXISTS sources;")
+                conn.executescript("DROP TABLE IF EXISTS docs; DROP TABLE IF EXISTS sources; DROP TABLE IF EXISTS session_stats;")
                 version = 0
             conn.executescript(
                 """
@@ -111,6 +113,16 @@ class SearchIndex:
                     archived   INTEGER DEFAULT 0,
                     rounds     INTEGER DEFAULT 0,
                     indexed_at REAL
+                );
+                CREATE TABLE IF NOT EXISTS session_stats (
+                    session_id TEXT PRIMARY KEY,
+                    prompts    INTEGER DEFAULT 0,
+                    replies    INTEGER DEFAULT 0,
+                    tool_calls INTEGER DEFAULT 0,
+                    tokens     INTEGER DEFAULT 0,
+                    first_day  TEXT,
+                    last_day   TEXT,
+                    days       TEXT
                 );
                 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
                     session_id UNINDEXED,
@@ -144,8 +156,21 @@ class SearchIndex:
         if session is None:
             session = build_from_path(ref.path, cwd_hint=ref.cwd)
         docs = list(_documents(session))
+        stats = session_stats(session)
         conn = self._conn()
         with self._lock:
+            conn.execute(
+                """INSERT INTO session_stats(session_id, prompts, replies, tool_calls, tokens, first_day, last_day, days)
+                   VALUES (?,?,?,?,?,?,?,?)
+                   ON CONFLICT(session_id) DO UPDATE SET
+                     prompts=excluded.prompts, replies=excluded.replies, tool_calls=excluded.tool_calls,
+                     tokens=excluded.tokens, first_day=excluded.first_day, last_day=excluded.last_day,
+                     days=excluded.days""",
+                (
+                    ref.session_id, stats["prompts"], stats["replies"], stats["tool_calls"], stats["tokens"],
+                    stats["first_day"], stats["last_day"], json.dumps(stats["days"], separators=(",", ":")),
+                ),
+            )
             conn.execute("DELETE FROM docs WHERE session_id=?", (ref.session_id,))
             conn.executemany(
                 "INSERT INTO docs(session_id, round_index, ts, kind, body) VALUES (?,?,?,?,?)",
@@ -207,6 +232,7 @@ class SearchIndex:
             for stale in known - alive:
                 conn.execute("DELETE FROM docs WHERE session_id=?", (stale,))
                 conn.execute("DELETE FROM sources WHERE session_id=?", (stale,))
+                conn.execute("DELETE FROM session_stats WHERE session_id=?", (stale,))
             if known - alive:
                 conn.commit()
 
@@ -278,6 +304,108 @@ class SearchIndex:
             "truncated": len(rows) >= limit,
         }
 
+    def overview(self, days: int | None = None, today: date | None = None) -> dict:
+        """Everything the home page's tiles and heatmap need, over every
+        session (live and archived), for the last ``days`` days or all time.
+
+        Per-day buckets stored with each session make a range a filter rather
+        than a re-read: a few hundred small JSON blobs, summed here.
+        """
+        today = today or date.today()
+        cutoff = (today - timedelta(days=days - 1)).isoformat() if days else ""
+        conn = self._conn()
+        try:
+            rows = conn.execute("SELECT session_id, days FROM session_stats").fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        day_totals: dict[str, dict] = {}
+        models: dict[str, dict] = {}
+        hours = [0] * 24
+        sessions = 0
+        for row in rows:
+            try:
+                buckets = json.loads(row["days"] or "{}")
+            except ValueError:
+                continue
+            counted = False
+            for day, b in buckets.items():
+                if cutoff and day < cutoff:
+                    continue
+                if day > today.isoformat():
+                    continue
+                counted = True
+                agg = day_totals.setdefault(day, {"p": 0, "r": 0, "t": 0, "c": 0})
+                agg["p"] += int(b.get("p", 0))
+                agg["r"] += int(b.get("r", 0))
+                agg["t"] += int(b.get("t", 0))
+                agg["c"] += int(b.get("c", 0))
+                for hour, n in (b.get("h") or {}).items():
+                    try:
+                        hours[int(hour) % 24] += int(n)
+                    except (TypeError, ValueError):
+                        pass
+                for model, tokens in (b.get("m") or {}).items():
+                    entry = models.setdefault(model, {"model": model, "tokens": 0, "sessions": set(), "prompts": 0})
+                    entry["tokens"] += int(tokens)
+                    entry["sessions"].add(row["session_id"])
+                    entry["prompts"] += int(b.get("p", 0))
+            if counted:
+                sessions += 1
+
+        active = sorted(d for d, v in day_totals.items() if v["p"] > 0)
+        longest = current = run = 0
+        prev: date | None = None
+        for d in active:
+            cur = date.fromisoformat(d)
+            run = run + 1 if prev is not None and cur - prev == timedelta(days=1) else 1
+            longest = max(longest, run)
+            prev = cur
+        if active:
+            last = date.fromisoformat(active[-1])
+            if today - last <= timedelta(days=1):
+                current = run
+        prompts = sum(v["p"] for v in day_totals.values())
+        replies = sum(v["r"] for v in day_totals.values())
+        tokens = sum(v["t"] for v in day_totals.values())
+        tool_calls = sum(v["c"] for v in day_totals.values())
+        peak = max(range(24), key=lambda h: hours[h]) if any(hours) else None
+        model_rows = sorted(
+            ({"model": m["model"], "tokens": m["tokens"], "sessions": len(m["sessions"]), "prompts": m["prompts"],
+              "share": round(m["tokens"] / tokens, 3) if tokens else 0}
+             for m in models.values()),
+            key=lambda m: -m["tokens"],
+        )
+        # The heatmap: the last 53 weeks ending this week, every day present,
+        # so the client draws a grid without date arithmetic.
+        end = today
+        start = end - timedelta(days=52 * 7 + end.weekday())
+        if days:
+            start = max(start, date.fromisoformat(cutoff))
+        grid = []
+        d = start
+        while d <= end:
+            v = day_totals.get(d.isoformat())
+            grid.append({"d": d.isoformat(), "p": v["p"] if v else 0, "t": v["t"] if v else 0})
+            d += timedelta(days=1)
+        return {
+            "range": days or 0,
+            "sessions": sessions,
+            "prompts": prompts,
+            "replies": replies,
+            "messages": prompts + replies,
+            "tool_calls": tool_calls,
+            "tokens": tokens,
+            "active_days": len(active),
+            "current_streak": current,
+            "longest_streak": longest,
+            "peak_hour": peak,
+            "favourite_model": model_rows[0]["model"] if model_rows else "",
+            "models": model_rows,
+            "hours": hours,
+            "grid": grid,
+            "first_day": active[0] if active else "",
+        }
+
     def stats(self) -> dict:
         conn = self._conn()
         try:
@@ -289,6 +417,63 @@ class SearchIndex:
         return {"sessions": sources, "documents": docs, "bytes": size,
                 "path": str(self.path), "syncing": self.syncing,
                 "last_sync": self.last_sync}
+
+
+# ---------------------------------------------------------------- stats
+
+
+def _local_day_hour(ts: str) -> tuple[str, int] | None:
+    if not ts:
+        return None
+    try:
+        when = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is not None:
+        when = when.astimezone()
+    return when.date().isoformat(), when.hour
+
+
+def session_stats(session) -> dict:
+    """Per-day buckets for one session: prompts, replies, tool calls, tokens
+    (cache reads excluded, as everywhere), tokens per model, prompts per
+    hour. Days are local, because "active days" and "peak hour" are about
+    the person, not UTC."""
+    from .model import Text
+
+    days: dict[str, dict] = {}
+    prompts = replies = tools = 0
+    for rnd in session.rounds:
+        if rnd.source in ("command", "system"):
+            continue
+        stamp = _local_day_hour(rnd.ts)
+        if stamp is None:
+            continue
+        day, hour = stamp
+        bucket = days.setdefault(day, {"p": 0, "r": 0, "c": 0, "t": 0, "m": {}, "h": {}})
+        bucket["p"] += 1
+        prompts += 1
+        if any(isinstance(i, Text) for i in rnd.items):
+            bucket["r"] += 1
+            replies += 1
+        n_tools = len(rnd.tool_calls)
+        bucket["c"] += n_tools
+        tools += n_tools
+        bucket["t"] += rnd.usage.total
+        for model, total in (rnd.usage_by_model or {}).items():
+            bucket["m"][model] = bucket["m"].get(model, 0) + int(total)
+        key = str(hour)
+        bucket["h"][key] = bucket["h"].get(key, 0) + 1
+    ordered = sorted(days)
+    return {
+        "prompts": prompts,
+        "replies": replies,
+        "tool_calls": tools,
+        "tokens": session.usage.total,
+        "first_day": ordered[0] if ordered else "",
+        "last_day": ordered[-1] if ordered else "",
+        "days": days,
+    }
 
 
 # ---------------------------------------------------------------- documents

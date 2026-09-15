@@ -266,6 +266,15 @@ image (it sees the picture); anything else, and everything on a terminal
 session, is named by path so Claude reads it with its own tools. `uploads.max_mb`
 caps the size.
 
+**The home page.** `#/` (the brand name, or `h`) is what the desktop app's
+landing page is, over every session on the machine instead of the few the
+app knows: sessions, messages, tokens, active days, streaks, peak hour and
+favourite model, a per-model breakdown, a year of activity as a calendar, and
+the sessions that need you. Filter to the last 7 or 30 days. The numbers come
+from the search index's own pass over the transcripts, so nothing is read
+twice; cache reads are excluded from every token count, as everywhere in
+scribe. The new-session composer sits underneath.
+
 **A new session.** `+ new` in the sidebar (or `n`, or the `+` on a project
 group) opens a page like the desktop app's: pick a folder, write the first
 message, and a page-driven session starts there under a fresh id. It shows in

@@ -323,6 +323,19 @@ worth testing is what Claude Code actually sees on stdout and how long it waits.
 
 Both suites must pass before committing.
 
+## The home page
+
+`#/` shows what the desktop app's landing page shows, over every session:
+tiles, a per-model breakdown, a calendar heatmap, and the sessions in *needs
+you*. The numbers come from `session_stats`, a table `search.py` fills in the
+same incremental pass that builds the FTS index (`session_stats(session)` in
+`index_ref`): per session, per local day, prompts / replies / tool calls /
+tokens / tokens-per-model / prompts-per-hour, as one JSON blob. `overview()`
+sums those for a range, so a range is a filter and never a re-read. Days are
+local because streaks and peak hour are about the person. Bumping
+`SCHEMA_VERSION` drops and rebuilds the whole index, which is the intended
+migration path.
+
 ## Search
 
 `search.py` keeps an FTS5 index at `~/.scribe/index.db`, one document per

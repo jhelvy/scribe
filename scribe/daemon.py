@@ -1312,6 +1312,21 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/new":
             return self._json({"recent": self.hub.recent_cwds(), "caps": self.hub.caps_for(None, "spawn", None, [])})
 
+        if route == "/api/stats":
+            span = (params.get("range") or ["all"])[0]
+            days = {"7d": 7, "30d": 30, "90d": 90, "365d": 365}.get(span)
+            try:
+                overview = self.hub.search.overview(days)
+            except Exception as exc:
+                return self._json({"error": f"stats unavailable: {exc}"[:200]}, 500)
+            overview["indexing"] = bool(self.hub.search.syncing)
+            overview["needs_you"] = [
+                {"id": c["id"], "title": c["title"], "project": c["project"], "phase": c["phase"], "state": c["state"]}
+                for c in self.hub.index_payload()
+                if c.get("phase") in ("needs_you",)
+            ][:8]
+            return self._json(overview)
+
         if route == "/api/fs":
             raw = (params.get("path") or [""])[0]
             path = os.path.expanduser(raw.strip())

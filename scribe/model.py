@@ -214,6 +214,7 @@ class Round:
     source: str = "user"  # user | web | peer | command | system
     items: list = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
+    usage_by_model: dict = field(default_factory=dict)  # model -> Usage.total
     duration_ms: int = 0
     images: int = 0
 
@@ -251,6 +252,7 @@ class Session:
     models: list = field(default_factory=list)
     rounds: list = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
+    usage_by_model: dict = field(default_factory=dict)  # model -> Usage.total
     transcript_path: str = ""
     log_path: str = ""
 

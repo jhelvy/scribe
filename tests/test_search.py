@@ -182,6 +182,54 @@ class TestSubagentContent(SearchCase):
         self.assertTrue(result["sessions"][0]["matches"][0]["kind"].startswith("subagent:"))
 
 
+class TestOverview(SearchCase):
+    def rows(self, session_id, stamps, model="claude-opus-5", cwd="/tmp/proj"):
+        out = []
+        for i, ts in enumerate(stamps):
+            out.append(user_row(session_id, f"prompt {i}", ts, f"u{i}", cwd=cwd))
+            out.append(assistant_row(session_id, [{"type": "text", "text": "reply"}, tool_use(f"t{i}", "Bash", {"command": "ls"})],
+                                     ts, f"a{i}", cwd=cwd, usage={"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 9000}))
+            out[-1]["message"]["model"] = model
+        return out
+
+    def test_buckets_streaks_and_models(self):
+        from datetime import date, timedelta
+
+        today = date(2026, 9, 15)
+        def at(d, hour=21):
+            return f"{d.isoformat()}T{hour:02d}:00:00Z"
+        self.write_rows(self.transcript_path(session_id="s1"), self.rows("s1", [at(today), at(today, 9), at(today - timedelta(days=1))]))
+        self.write_rows(self.transcript_path(session_id="s2"), self.rows("s2", [at(today - timedelta(days=2)), at(today - timedelta(days=40))], model="claude-haiku-4-5"))
+        self.index.sync()
+        # Everything is stamped in UTC; local buckets may shift a day at the
+        # edges, so assert on totals and shapes, not on the exact day keys.
+        allt = self.index.overview(None, today=today + timedelta(days=1))
+        self.assertEqual(allt["sessions"], 2)
+        self.assertEqual(allt["prompts"], 5)
+        self.assertEqual(allt["replies"], 5)
+        self.assertEqual(allt["tool_calls"], 5)
+        self.assertEqual(allt["tokens"], 5 * 150)  # cache reads excluded
+        self.assertEqual({m["model"] for m in allt["models"]}, {"claude-opus-5", "claude-haiku-4-5"})
+        self.assertEqual(allt["favourite_model"], "claude-opus-5")
+        self.assertEqual(allt["models"][0]["sessions"], 1)
+        self.assertGreaterEqual(allt["longest_streak"], 2)
+        self.assertEqual(len(allt["grid"]), 52 * 7 + (today + timedelta(days=1)).weekday() + 1)
+        self.assertEqual(sum(g["p"] for g in allt["grid"]), 5)
+        recent = self.index.overview(7, today=today + timedelta(days=1))
+        self.assertEqual(recent["prompts"], 4)
+        self.assertEqual(recent["sessions"], 2)
+        self.assertEqual(recent["range"], 7)
+        self.assertLessEqual(len(recent["grid"]), 7)
+        self.assertIsNotNone(allt["peak_hour"])
+
+    def test_an_empty_index_is_a_quiet_overview(self):
+        empty = self.index.overview(30)
+        self.assertEqual(empty["sessions"], 0)
+        self.assertEqual(empty["current_streak"], 0)
+        self.assertEqual(empty["models"], [])
+        self.assertIsNone(empty["peak_hour"])
+
+
 class TestStats(SearchCase):
     def test_stats_report_the_corpus(self):
         self.make("s1", "one")
