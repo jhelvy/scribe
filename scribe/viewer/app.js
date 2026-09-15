@@ -1733,14 +1733,14 @@
 
     var modeBtn = $("mode-btn");
     $("mode-label").textContent = modeLabel(modeValue);
-    modeBtn.disabled = !mode.settable;
+    modeBtn.dataset.settable = String(!!mode.settable);
     modeBtn.dataset.value = modeValue;
-    modeBtn.title = mode.settable ? "Permission mode (Shift+Tab cycles)" : "Permission mode — change it in the terminal";
+    modeBtn.title = mode.settable ? "Permission mode (Shift+Tab cycles)" : "Permission mode — set by the terminal this session runs in";
 
     var modelBtn = $("model-btn");
     $("model-label").textContent = modelLabel(modelValue);
-    modelBtn.disabled = !model.settable;
-    modelBtn.title = model.settable ? "Model" : "Model — change it in the terminal";
+    modelBtn.dataset.settable = String(!!model.settable);
+    modelBtn.title = model.settable ? "Model" : "Model — set by the terminal this session runs in";
 
     $("attach-btn").hidden = !caps.attachments || caps.attachments === "none";
     $("attach-btn").title = caps.attachments === "blocks"
@@ -1760,10 +1760,29 @@
                       spawn: "no process yet — the first message starts one in the session's folder" }[via] || "";
   }
 
+  // A terminal session's mode and model belong to that terminal. Claude
+  // Code offers no way in from outside (a slash command sent through the
+  // inbox reaches the model as a peer message and is refused), so the chip
+  // says so and offers the one thing the page can do: start a session of
+  // its own here, where both are switchable.
+  function explainReadOnly(anchor, what, how) {
+    var via = state.head.reply_via;
+    var cwd = state.head.cwd || "";
+    var items = [
+      { label: what + " is set in the terminal", detail: via === "inbox"
+          ? "this session runs in a terminal; " + how + " there. Claude Code gives no other process a way in."
+          : "no process of scribe's own is behind this session yet.", disabled: true },
+    ];
+    if (cwd) {
+      items.push({ label: "start a page session here", detail: "a fresh session in " + cwd + ", with mode and model switchable from this page", value: "new" });
+    }
+    openPopover({ anchor: anchor, cls: "menu", items: items, onPick: function (item) { if (item.value === "new") showNew(cwd); } });
+  }
+
   function pickMode() {
     var caps = state.head.caps || {};
     var mode = caps.mode || {};
-    if (!mode.settable) return;
+    if (!mode.settable) return explainReadOnly($("mode-btn"), "the mode", "press Shift+Tab");
     var current = $("mode-btn").dataset.value;
     openPopover({
       anchor: $("mode-btn"),
@@ -1801,7 +1820,7 @@
   function pickModel() {
     var caps = state.head.caps || {};
     var model = caps.model || {};
-    if (!model.settable) return;
+    if (!model.settable) return explainReadOnly($("model-btn"), "the model", "type /model");
     var current = modelLabel($("model-label").textContent);
     openPopover({
       anchor: $("model-btn"),

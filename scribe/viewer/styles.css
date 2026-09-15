@@ -980,7 +980,9 @@ pre.code.err { color: var(--del); background: var(--del-bg); border-color: color
 .btn.ghost:hover:not(:disabled) { background: var(--paper-3); color: var(--ink); }
 .btn.ghost:disabled { cursor: default; opacity: 0.85; }
 .btn.picker .caret { font-size: 0.55rem; opacity: 0.7; }
-.btn.picker:disabled .caret { display: none; }
+.btn.picker[data-settable="false"] { color: var(--ink-3); }
+.btn.picker[data-settable="false"] .caret { opacity: 0.35; }
+.popover-item.disabled .popover-detail { white-space: normal; }
 #attach-btn { font-size: 0.9rem; line-height: 1; padding: 0.15rem 0.45rem; }
 #stop-btn { color: var(--danger); }
 .channel {
