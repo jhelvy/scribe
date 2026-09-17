@@ -147,3 +147,30 @@ class TestInstall(Isolated):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFirstRun(Isolated):
+    """Bare `scribe` is the whole setup: the first run registers the hooks."""
+
+    def setUp(self):
+        super().setUp()
+        self._quiet = contextlib.redirect_stdout(io.StringIO())
+        self._quiet.__enter__()
+        self.addCleanup(lambda: self._quiet.__exit__(None, None, None))
+
+    def test_the_first_run_installs_the_hooks_and_opens_the_page(self):
+        from unittest import mock
+
+        from scribe import cli, daemon
+
+        opened = []
+        with mock.patch.object(daemon, "ensure_running", return_value={"url": "http://127.0.0.1:1"}), \
+                mock.patch.object(daemon.webbrowser, "open", opened.append):
+            self.assertFalse(install.is_installed())
+            self.assertEqual(cli.main([]), 0)
+            self.assertTrue(install.is_installed())
+            # The second run finds the hooks in place and only opens the page.
+            before = install.settings_path().read_text()
+            self.assertEqual(cli.main([]), 0)
+            self.assertEqual(install.settings_path().read_text(), before)
+        self.assertEqual(opened, ["http://127.0.0.1:1", "http://127.0.0.1:1"])

@@ -24,8 +24,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     handler = getattr(args, "handler", None)
     if handler is None:
-        parser.print_help()
-        return 0
+        # Bare `scribe` is the launcher: make sure the daemon is up and open
+        # the page. `scribe --help` still lists the subcommands.
+        from . import daemon
+
+        return daemon.open_home()
     try:
         return handler(args) or 0
     except KeyboardInterrupt:
@@ -37,7 +40,8 @@ def main(argv: list[str] | None = None) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scribe",
-        description="A readable, regenerable copy of every Claude Code session.",
+        description="A readable, regenerable copy of every Claude Code session. "
+        "With no command, starts the daemon if needed and opens the page.",
     )
     from . import __version__
 

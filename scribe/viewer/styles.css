@@ -418,7 +418,7 @@ body {
 
 /* -------------------------------------------------------------- main pane */
 
-.main { display: flex; flex-direction: column; min-width: 0; }
+.main { --pad: 2.5rem; display: flex; flex-direction: column; min-width: 0; }
 
 .topbar {
   position: sticky;
@@ -507,31 +507,41 @@ body {
 /* ------------------------------------------------------------------ stage */
 
 /* The asymmetry: reading column then rail, pushed off centre. */
-.stage {
-  --pad: 2.5rem;
+.stage,
+.dock-inner {
   display: grid;
   grid-template-columns: minmax(0, var(--measure)) var(--rail-w);
   gap: 2.25rem;
   /* Centre the column+rail pair rather than pinning it left: on a wide screen
      the sidebar already pushes everything right, and pinning leaves a dead
      third of the viewport. The pair is a fixed width, so the reading column
-     never moves when notes appear or disappear. */
+     never moves when notes appear or disappear. The dock uses the same grid,
+     so the composer sits exactly under the reading column at every width. */
   justify-content: center;
+}
+.stage {
   padding: 2rem var(--pad) 38vh var(--pad);
   position: relative;
 }
+.dock-inner { padding: 0 var(--pad); row-gap: 0; }
+.dock-inner > * { grid-column: 1; }
 
 @media (max-width: 78rem) {
-  .stage { grid-template-columns: minmax(0, var(--measure)); }
+  .stage, .dock-inner { grid-template-columns: minmax(0, var(--measure)); }
   .rail { display: none; }
 }
+/* The new-session view has no rail, so its column is centred alone. */
+body[data-view="new"] .stage,
+body[data-view="new"] .dock-inner { grid-template-columns: minmax(0, var(--measure)); }
+body[data-view="new"] .rail,
+body[data-view="new"] .find { display: none; }
 
 @media (max-width: 60rem) {
   #app { grid-template-columns: 1fr; }
   .sidebar { position: fixed; inset: 0 auto 0 0; width: 15rem; z-index: 60;
     transform: translateX(-100%); transition: transform 220ms var(--ease); }
   .sidebar[data-open="true"] { transform: none; box-shadow: var(--shadow-2); }
-  .stage { --pad: 1.1rem; }
+  .main { --pad: 1.1rem; }
   /* The sidebar is off-canvas here, so it needs a way back. */
   #menu-toggle.hidden { display: inline-flex !important; }
   .topbar .title { font-size: 0.75rem; }
@@ -563,8 +573,9 @@ pre.code,
 .round-head {
   display: flex;
   align-items: baseline;
+  justify-content: flex-end;
   gap: 0.5rem;
-  margin-bottom: 0.55rem;
+  margin-bottom: 0.45rem;
 }
 
 .round-n {
@@ -595,20 +606,56 @@ pre.code,
   gap: 0.45rem;
 }
 
-/* The prompt: not a card. A rule in the margin and a slight indent is enough
-   to separate the human voice, and it keeps the page from becoming a stack of
-   boxes. */
-.prompt {
-  border-left: 2px solid var(--ember);
-  padding: 0.1rem 0 0.1rem 1rem;
+/* Two voices, two sides. What you wrote sits on the right in a bubble; what
+   Claude wrote runs on the left as prose, full measure. The sides say who is
+   speaking, so neither needs a label to be read. */
+.ask {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
   margin: 0 0 1.4rem;
-  font-size: 1.0625rem;
+}
+.ask:empty { display: none; }
+.prompt {
+  max-width: 88%;
+  padding: 0.55rem 0.95rem;
+  background: var(--paper-2);
+  border: 1px solid var(--rule-soft);
+  border-radius: 1.1rem 1.1rem 0.35rem 1.1rem;
+  font-size: 1rem;
   color: var(--ink);
 }
 .prompt > :first-child { margin-top: 0; }
 .prompt > :last-child { margin-bottom: 0; }
+.ask .attached { justify-content: flex-end; margin: 0; }
+.ask .notice { text-align: right; }
 
 .reply { margin-left: 0; }
+
+/* Claude at work: a spark at the foot of the column, turning while a turn is
+   in progress. It is in the column, not the dock, so it sits where the reply
+   will appear. */
+.working {
+  display: flex;
+  align-items: center;
+  min-height: 2.75rem;
+  margin: -1.25rem 0 0.5rem;
+  color: var(--ember);
+}
+.spark {
+  width: 1.65rem;
+  height: 1.65rem;
+  stroke: currentColor;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  animation: spark-turn 2.8s linear infinite, spark-breathe 1.6s ease-in-out infinite;
+}
+@keyframes spark-turn { to { transform: rotate(360deg); } }
+@keyframes spark-breathe {
+  0%, 100% { opacity: 1; scale: 1; }
+  50% { opacity: 0.55; scale: 0.82; }
+}
 
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
@@ -931,12 +978,11 @@ pre.code.err { color: var(--del); background: var(--del-bg); border-color: color
   bottom: 0;
   z-index: 25;
   margin-top: auto;
-  padding: 0.6rem 1rem 0.75rem;
+  padding: 0.6rem 0 0.75rem;
   background: color-mix(in oklch, var(--paper) 92%, transparent);
   backdrop-filter: blur(10px);
   border-top: 1px solid var(--rule);
 }
-.dock-inner { max-width: calc(var(--measure) + var(--rail-w) + 2.25rem); }
 
 .compose {
   display: flex;
@@ -1413,8 +1459,9 @@ body[data-view="board"] #log-link { display: none !important; }
 
 /* ------------------------------------------------------------ new session */
 
-.newpanel { margin: 1.5rem 0 1rem; }
-.newpanel h2 { font-family: var(--serif); font-weight: 500; font-size: 1.5rem; margin: 0 0 0.4rem; color: var(--ink); }
+.newpanel { margin: 2.5rem 0 1rem; }
+.new-title { font-family: var(--serif); font-weight: 500; font-size: 1.6rem; margin: 0 0 0.4rem; color: var(--ink); }
+.new-title::before { content: "✻ "; color: var(--ember); }
 .newpanel .lede { font-family: var(--serif); color: var(--ink-2); margin: 0 0 1.5rem; }
 .cwd-field {
   display: flex;
@@ -1455,91 +1502,7 @@ body[data-view="board"] #log-link { display: none !important; }
 }
 .project-name:hover .pnew { opacity: 1; }
 .project-name .pnew:hover { background: var(--paper-3); color: var(--ink); }
-body[data-view="home"] .rail { display: none; }
-body[data-view="home"] .find { display: none; }
 .brand b { cursor: pointer; }
-
-/* ------------------------------------------------------------------- home */
-
-.home { max-width: calc(var(--measure) + 8rem); margin: 2.5rem auto 1rem; padding: 0 1rem; }
-.home-title { font-family: var(--serif); font-weight: 500; font-size: 1.6rem; margin: 0 0 1.2rem; color: var(--ink); }
-.home-title::before { content: "✻ "; color: var(--ember); }
-
-.stats {
-  padding: 0.75rem 0.9rem 0.8rem;
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-lg);
-  background: var(--paper-2);
-}
-.stats-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.7rem; }
-.seg { display: inline-flex; gap: 0.15rem; padding: 0.12rem; border-radius: var(--radius); background: var(--paper-3); }
-.seg-btn {
-  border: 0; background: transparent; color: var(--ink-3);
-  padding: 0.18rem 0.5rem; border-radius: 2px;
-  font-family: var(--mono); font-size: 0.625rem; letter-spacing: 0.03em; cursor: pointer;
-}
-.seg-btn[aria-pressed="true"] { background: var(--paper); color: var(--ink); box-shadow: var(--shadow-1); }
-
-.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.4rem; margin-bottom: 0.75rem; }
-@media (max-width: 40rem) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-.tile {
-  display: flex; flex-direction: column; gap: 0.15rem;
-  padding: 0.45rem 0.55rem;
-  border-radius: var(--radius);
-  background: var(--paper);
-  border: 1px solid var(--rule-soft);
-}
-.tile-label { font-family: var(--mono); font-size: 0.5625rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-3); }
-.tile-value { font-family: var(--mono); font-size: 0.95rem; font-weight: 600; color: var(--ink); }
-
-.heatmap-wrap { overflow-x: auto; }
-.heatmap { display: block; width: 100%; max-width: 46rem; height: auto; }
-.hm-label { font-family: var(--mono); font-size: 10px; fill: var(--ink-3); }
-.hm { fill: var(--hm-0); }
-.hm1 { fill: var(--hm-1); } .hm2 { fill: var(--hm-2); } .hm3 { fill: var(--hm-3); } .hm4 { fill: var(--hm-4); }
-:root {
-  --hm-0: oklch(0.9 0.008 85);
-  --hm-1: oklch(0.86 0.06 50);
-  --hm-2: oklch(0.76 0.11 45);
-  --hm-3: oklch(0.64 0.14 42);
-  --hm-4: oklch(0.5 0.15 40);
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --hm-0: oklch(0.28 0.01 60);
-    --hm-1: oklch(0.38 0.06 45);
-    --hm-2: oklch(0.5 0.1 44);
-    --hm-3: oklch(0.62 0.13 43);
-    --hm-4: oklch(0.76 0.14 50);
-  }
-}
-:root[data-theme="dark"] {
-  --hm-0: oklch(0.28 0.01 60);
-  --hm-1: oklch(0.38 0.06 45);
-  --hm-2: oklch(0.5 0.1 44);
-  --hm-3: oklch(0.62 0.13 43);
-  --hm-4: oklch(0.76 0.14 50);
-}
-.stats-note { margin-top: 0.6rem; font-family: var(--mono); font-size: 0.625rem; color: var(--ink-3); }
-
-.models { display: flex; flex-direction: column; gap: 0.3rem; }
-.model-row {
-  display: grid; grid-template-columns: 7rem 1fr 5rem 3rem 6rem; gap: 0.6rem; align-items: center;
-  font-family: var(--mono); font-size: 0.6875rem; color: var(--ink-2);
-}
-.model-name { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.model-bar { height: 0.5rem; border-radius: 2px; background: var(--hm-0); overflow: hidden; }
-.model-bar i { display: block; height: 100%; background: var(--hm-3); border-radius: 2px; }
-.model-num { text-align: right; color: var(--ink-3); white-space: nowrap; }
-
-.needs { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin-top: 0.8rem; }
-.needs:empty { display: none; }
-.needs-label { font-family: var(--mono); font-size: 0.5625rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--amber); }
-.needs-item {
-  padding: 0.2rem 0.55rem; border: 1px solid color-mix(in oklch, var(--amber) 45%, transparent);
-  border-radius: 999px; background: var(--amber-soft); color: var(--ink);
-  font-family: var(--mono); font-size: 0.625rem; cursor: pointer;
-}
 
 /* ------------------------------------------------------------ attachments */
 

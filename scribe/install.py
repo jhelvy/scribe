@@ -177,8 +177,6 @@ def install(project: bool = False, dry_run: bool = False) -> int:
         print(f"  backup: {backup}")
     print(f"  events: {', '.join(sorted(EVENTS))}")
     print("\nStart a new Claude Code session to pick them up.")
-    if not paths.control_socket().exists():
-        print("The daemon starts itself on SessionStart; `scribe serve` runs it now.")
     return 0
 
 

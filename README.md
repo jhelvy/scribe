@@ -4,8 +4,8 @@
 read it in.**
 
 ```
-scribe install     # register the hooks
-scribe serve       # open the viewer
+uv tool install git+https://github.com/jhelvy/scribe
+scribe
 ```
 
 Python 3 standard library only. Nothing here writes to a transcript, and
@@ -75,7 +75,7 @@ ten years when this program no longer exists.
 Updates stream over SSE and are applied in place, so an open tool call stays
 open and your scroll position holds while the log grows underneath you.
 
-**Shows every live session on a board.** Press `b` or click *board*: sessions
+**Shows every live session on a board.** It is the home page; `b` toggles it against the open session. Sessions
 sit in columns by what they are waiting on — *needs you* (an approval, a
 question, a plan), *planning*, *working*, *your turn* (Claude replied) — with
 the running command, the reply's first line, or the approval countdown on the
@@ -103,48 +103,41 @@ on Windows see [Things worth knowing](#things-worth-knowing).
 uv tool install git+https://github.com/jhelvy/scribe
 ```
 
-or `pipx install git+https://github.com/jhelvy/scribe`, or
-`pip install git+https://github.com/jhelvy/scribe` into a virtualenv. Any of
-them puts a `scribe` command on your PATH. Then, in this order:
+No `uv`? `pipx install git+https://github.com/jhelvy/scribe` does the same.
+Either puts a `scribe` command on your PATH. Then:
 
 ```bash
-scribe archive     # 1. back up everything you still have, right now
-scribe install     # 2. register hooks in ~/.claude/settings.json
-scribe serve       # 3. start the daemon and open the viewer
+scribe
 ```
 
-**Do step 1 first.** It is the only step with a deadline: it copies transcripts
-that Claude Code may delete out from under you, and nothing else here can bring
-those back. It is also safe to run at any time, on a machine where scribe is
-not yet installed, and repeatedly.
+That is the whole setup, and the everyday command. The first run registers
+scribe's hooks in `~/.claude/settings.json` and says so; every run starts the
+daemon in the background if it is not up and opens the board in your browser.
+The daemon copies every transcript it can see into the archive as it starts,
+so nothing you still have is at risk from that moment on. `scribe stop` stops
+the daemon; `scribe install --uninstall` removes the hooks and restores the
+settings file exactly as it was, leaving the archive intact.
 
-Step 2 backs `settings.json` up first, writes *through* a symlink rather than
-replacing it (dotfiles setups keep working), and only touches entries it
-recognises as its own. `scribe install --dry-run` shows the diff without
-writing; `scribe install --uninstall` restores exactly what was there before,
-leaving the archive intact.
+Registering the hooks backs `settings.json` up first, writes *through* a
+symlink rather than replacing it (dotfiles setups keep working), and only
+touches entries it recognises as its own. `scribe install --dry-run` shows the
+diff without writing.
 
-After step 2 the daemon starts itself whenever a session begins, so step 3 is
-only needed the first time — after that, `scribe open`.
+To update, run the install line again.
 
-<details>
-<summary><b>Running from a clone instead</b></summary>
+### Working from a clone
 
-No install step; `bin/scribe` runs straight out of the working tree.
+From the repo root, once:
 
 ```bash
-git clone https://github.com/jhelvy/scribe
-cd scribe
-./bin/scribe archive
-./bin/scribe install     # registers this checkout's path with Claude Code
-./bin/scribe serve
+uv tool install --editable .
 ```
 
-Everywhere this README says `scribe`, use `./bin/scribe`. Note that `install`
-writes the checkout's absolute path into `settings.json`, so moving or deleting
-the clone breaks the hooks until you re-run it.
-
-</details>
+`scribe` then runs the checkout as it is: switch branches or pull and the
+command follows, with no reinstall. `./bin/scribe` does the same without
+installing anything. Both the hooks and the editable install record the
+checkout's absolute path, so moving or deleting the clone breaks them until
+you run those commands again.
 
 ### Where it puts things
 
@@ -166,6 +159,7 @@ and you have kept everything; `scribe build --all` regenerates the rest.
 ## Commands
 
 ```
+scribe                               # start the daemon if needed, open the board
 scribe search <query>                # full-text across every conversation
 scribe archive [session]             # copy transcripts into the archive
 scribe serve [--port N] [--background] [--no-browser]
@@ -268,14 +262,8 @@ caps the size. In the conversation an attached picture shows as the picture
 and any other file as a card with its name, type and size; either opens in a
 new tab. Screenshots pasted in the terminal show the same way.
 
-**The home page.** `#/` (the brand name, or `h`) is what the desktop app's
-landing page is, over every session on the machine instead of the few the
-app knows: sessions, messages, tokens, active days, streaks, peak hour and
-favourite model, a per-model breakdown, a year of activity as a calendar, and
-the sessions that need you. Filter to the last 7 or 30 days. The numbers come
-from the search index's own pass over the transcripts, so nothing is read
-twice; cache reads are excluded from every token count, as everywhere in
-scribe. The new-session composer sits underneath.
+**The home page is the board.** `#/` (the brand name, or `h`) lands on it,
+so the first thing the page shows is what needs you.
 
 **A new session.** `+ new` in the sidebar (or `n`, or the `+` on a project
 group) opens a page like the desktop app's: pick a folder, write the first
@@ -409,7 +397,7 @@ cached so nothing is sent twice, and `explain.enabled false` turns it off.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t tests   # 167 tests
+python3 -m unittest discover -s tests -t tests   # 268 tests
 node tests/test_rail.mjs                          # the rail's layout solver
 node tests/test_compose.mjs                       # the composer's key and token rules
 ```

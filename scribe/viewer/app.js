@@ -42,7 +42,7 @@
     folded: false,
     es: null,
     reconnect: 0,
-    view: "session",    // session | board
+    view: "session",    // session | board | new
     doneOpen: false,    // the board's done column, expanded or a strip
     boardTick: null,
     cfg: {},
@@ -51,11 +51,8 @@
     popover: null,
     commands: null,     // the slash catalogue for the current session
     commandsKey: "",
-    newCwd: "",         // the folder picked on the home view
+    newCwd: "",         // the folder picked on the new-session view
     stamp: "",          // the daemon's viewer-files hash, from the SSE hello
-    stats: null,
-    statsRange: "all",
-    statsTab: "overview",
     draft: false,       // the open session has no transcript yet
     fileSeq: 0,
     fileTimer: null,
@@ -465,6 +462,7 @@
     });
 
     rebuildNotes();
+    syncWorking();
     if (state.find) runFind(state.find, false);
     if (appended && state.following) scrollToBottom();
     scheduleRail(true);
@@ -1350,6 +1348,7 @@
     });
   }
 
+  // The board is the home page: `#/`, the brand name, or `h`.
   function showBoard() {
     if (state.view === "board") return;
     state.view = "board";
@@ -1357,7 +1356,7 @@
     $("board").hidden = false;
     $("session-title").textContent = "board";
     $("board-toggle").setAttribute("aria-pressed", "true");
-    if (location.hash !== "#/board") location.hash = "#/board";
+    if (location.hash !== "#/") location.hash = "#/";
     // Subscribe with no session: the stream then carries only what every
     // page gets — the session list and card updates.
     openStream("");
@@ -1380,7 +1379,6 @@
   function toggleBoard() {
     if (state.view !== "board") return showBoard();
     if (state.sessionId) selectSession(state.sessionId);
-    else showHome();
   }
 
   function mergeCard(card) {
@@ -1454,7 +1452,54 @@
     $("arm-toggle").setAttribute("aria-pressed", String(!!head.armed));
     $("arm-toggle").hidden = !head.remote_approval;
     applyDock(head);
+    syncWorking();
     updateFollowPill();
+  }
+
+  // Claude is working: the board's card for this session says so (its phase
+  // is read off the transcript's tail, refined by the daemon), or a driver of
+  // ours is mid-turn. The sign is a spark at the end of the column, like the
+  // desktop app's, so a turn in progress is visible without reading the dock.
+  function isWorking() {
+    if (state.view !== "session" || !state.sessionId) return false;
+    var card = state.sessions.find(function (s) { return s.id === state.sessionId; });
+    if (card && (card.phase === "working" || card.phase === "planning")) return true;
+    return !!(state.head.driver && state.head.driver.state === "running");
+  }
+
+  function sparkNode() {
+    var NS = "http://www.w3.org/2000/svg";
+    var svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "-12 -12 24 24");
+    svg.setAttribute("class", "spark");
+    svg.setAttribute("aria-hidden", "true");
+    for (var i = 0; i < 8; i++) {
+      var ray = document.createElementNS(NS, "line");
+      ray.setAttribute("x1", 0); ray.setAttribute("y1", i % 2 ? -4.5 : -3.6);
+      ray.setAttribute("x2", 0); ray.setAttribute("y2", i % 2 ? -10.5 : -9);
+      ray.setAttribute("transform", "rotate(" + i * 45 + ")");
+      svg.appendChild(ray);
+    }
+    return svg;
+  }
+
+  function syncWorking() {
+    var column = $("column");
+    var node = $("working");
+    var on = isWorking();
+    if (!on) { if (node) node.remove(); return; }
+    if (!node) {
+      node = el("div", "working");
+      node.id = "working";
+      node.setAttribute("role", "status");
+      node.setAttribute("aria-label", "Claude is working");
+      node.appendChild(sparkNode());
+    }
+    // Rounds are inserted by index and may land after it; it stays last.
+    if (column.lastElementChild !== node) {
+      column.appendChild(node);
+      if (state.following) scrollToBottom();
+    }
   }
 
   // How a message typed here reaches the session. The daemon decides
@@ -1578,6 +1623,7 @@
       state.sessions = JSON.parse(ev.data);
       renderSidebar();
       renderBoard();
+      syncWorking();
       if (state.draft && state.sessionId) {
         var mine = state.sessions.find(function (s) { return s.id === state.sessionId; });
         if (mine && !mine.draft) load(state.sessionId);
@@ -1587,6 +1633,7 @@
       mergeCard(JSON.parse(ev.data));
       renderSidebar();
       renderBoard();
+      syncWorking();
     });
     es.addEventListener("notify", function (ev) {
       var data = JSON.parse(ev.data);
@@ -2057,52 +2104,32 @@
 
   /* ------------------------------------------------------------- new session */
 
-  // The "what's up next" view: pick a folder, write the first message, and a
+  // The new-session view: pick a folder, write the first message, and a
   // driver starts a fresh session there. Until Claude writes the transcript
-  // the session is a draft card; the daemon swaps in the real one.
+  // the session is a draft card; the daemon swaps in the real one. `#/new`
+  // lands here with the composer focused.
   function showNew(cwd) {
-    showHome(cwd, true);
-  }
-
-  // The home: what you have done, over every session on the machine, and
-  // where to start the next one. `#/` lands here; `#/new` too, with the
-  // composer focused.
-  function showHome(cwd, focus) {
-    var already = state.view === "home";
     leaveBoard();
     closePopover();
     clearAttachments();
-    state.view = "home";
-    document.body.dataset.view = "home";
+    state.view = "new";
+    document.body.dataset.view = "new";
     state.sessionId = null;
     state.draft = false;
     state.commands = null;
     state.compose = { mode: "", model: "" };
     state.newCwd = cwd || state.newCwd || "";
-    if (location.hash !== "#/" && location.hash !== "#/new") location.hash = "#/";
-    document.title = "scribe";
-    $("session-title").textContent = "home";
+    if (location.hash !== "#/new") location.hash = "#/new";
+    document.title = "new session · scribe";
+    $("session-title").textContent = "new session";
     clear($("session-facts"));
     $("arm-toggle").hidden = true;
     openStream("");
     resetView();
 
     var column = $("column");
-    clear(column);
-    clear($("rail-inner"));
-    clear($("tethers"));
-    var home = el("div", "home");
-    home.appendChild(el("h2", "home-title", "What's up next?"));
-    var stats = el("section", "stats");
-    stats.id = "stats";
-    home.appendChild(stats);
-    var needs = el("div", "needs");
-    needs.id = "needs";
-    home.appendChild(needs);
-    column.appendChild(home);
-    loadStats(state.statsRange || "all", state.statsTab || "overview");
-
     var panel = el("div", "newpanel");
+    panel.appendChild(el("h2", "new-title", "What's up next?"));
     panel.appendChild(el("p", "lede", "Pick a folder, write the first message, and Claude starts there. The session lands in the list on the left like any other."));
     var field = el("label", "cwd-field");
     field.appendChild(el("span", "label", "start in"));
@@ -2123,7 +2150,7 @@
     panel.appendChild(list);
     var recent = el("div", "recent");
     panel.appendChild(recent);
-    home.appendChild(panel);
+    column.appendChild(panel);
 
     function check() {
       var value = input.value.trim();
@@ -2165,194 +2192,9 @@
         input.value = r.recent[0].cwd;
       }
       check();
-      if (focus) { if (input.value) focusComposer(); else input.focus(); }
+      if (input.value) focusComposer(); else input.focus();
     });
     renderSidebar();
-  }
-
-  // -- the stats card -------------------------------------------------------
-
-  function fmtCount(n) {
-    n = Number(n) || 0;
-    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M";
-    if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k";
-    return String(n);
-  }
-
-  function hourLabel(h) {
-    if (h == null) return "—";
-    var ampm = h < 12 ? "AM" : "PM";
-    var x = h % 12 || 12;
-    return x + " " + ampm;
-  }
-
-  function loadStats(range, tab) {
-    state.statsRange = range;
-    state.statsTab = tab;
-    var node = $("stats");
-    if (!node) return;
-    api("/api/stats?range=" + encodeURIComponent(range)).then(function (data) {
-      if (!$("stats") || state.view !== "home") return;
-      if (data.error) { clear($("stats")); $("stats").appendChild(el("div", "empty", data.error)); return; }
-      state.stats = data;
-      renderStats(data, tab);
-      renderNeeds(data.needs_you || []);
-    });
-  }
-
-  function renderStats(data, tab) {
-    var node = $("stats");
-    clear(node);
-
-    var head = el("div", "stats-head");
-    var tabs = el("div", "seg");
-    [["overview", "Overview"], ["models", "Models"]].forEach(function (t) {
-      var b = el("button", "seg-btn", t[1]);
-      b.type = "button";
-      b.setAttribute("aria-pressed", String(t[0] === tab));
-      b.addEventListener("click", function () { renderStats(state.stats, t[0]); state.statsTab = t[0]; });
-      tabs.appendChild(b);
-    });
-    head.appendChild(tabs);
-    head.appendChild(el("span", "spacer"));
-    var ranges = el("div", "seg");
-    [["all", "All"], ["30d", "30d"], ["7d", "7d"]].forEach(function (r) {
-      var b = el("button", "seg-btn", r[1]);
-      b.type = "button";
-      b.setAttribute("aria-pressed", String(r[0] === state.statsRange));
-      b.addEventListener("click", function () { loadStats(r[0], state.statsTab); });
-      ranges.appendChild(b);
-    });
-    head.appendChild(ranges);
-    node.appendChild(head);
-
-    if (tab === "models") {
-      renderModels(node, data);
-    } else {
-      var tiles = el("div", "tiles");
-      [
-        ["Sessions", fmtCount(data.sessions)],
-        ["Messages", fmtCount(data.messages)],
-        ["Total tokens", fmtCount(data.tokens)],
-        ["Active days", fmtCount(data.active_days)],
-        ["Current streak", data.current_streak + "d"],
-        ["Longest streak", data.longest_streak + "d"],
-        ["Peak hour", hourLabel(data.peak_hour)],
-        ["Favourite model", modelLabel(data.favourite_model) || "—"],
-      ].forEach(function (t) {
-        var tile = el("div", "tile");
-        tile.appendChild(el("span", "tile-label", t[0]));
-        tile.appendChild(el("b", "tile-value", t[1]));
-        tiles.appendChild(tile);
-      });
-      node.appendChild(tiles);
-      node.appendChild(heatmap(data.grid || []));
-    }
-
-    var books = data.tokens / 160000;
-    var note = books >= 1
-      ? "You've used ~" + (books >= 10 ? Math.round(books) : books.toFixed(1)) + "× more tokens than Pride and Prejudice."
-      : data.indexing ? "Still indexing…" : "";
-    if (note) node.appendChild(el("div", "stats-note", note));
-  }
-
-  function renderModels(node, data) {
-    var models = data.models || [];
-    if (!models.length) { node.appendChild(el("div", "empty", "no model usage in this range")); return; }
-    var table = el("div", "models");
-    var maxTokens = Math.max.apply(null, models.map(function (m) { return m.tokens; }));
-    models.forEach(function (m) {
-      var row = el("div", "model-row");
-      row.appendChild(el("span", "model-name", modelLabel(m.model)));
-      var bar = el("span", "model-bar");
-      var fill = el("i");
-      fill.style.width = Math.max(2, Math.round(100 * m.tokens / (maxTokens || 1))) + "%";
-      bar.appendChild(fill);
-      row.appendChild(bar);
-      row.appendChild(el("span", "model-num", fmtCount(m.tokens) + " tok"));
-      row.appendChild(el("span", "model-num", Math.round(m.share * 100) + "%"));
-      row.appendChild(el("span", "model-num", m.sessions + " session" + (m.sessions === 1 ? "" : "s")));
-      row.title = m.model;
-      table.appendChild(row);
-    });
-    node.appendChild(table);
-  }
-
-  // A calendar heatmap: one hue, light to dark, in five steps by quantile
-  // of the days that had anything at all. Inline SVG so the CSS tokens
-  // colour it in both themes.
-  function heatmap(grid) {
-    var NS = "http://www.w3.org/2000/svg";
-    var cell = 11, gap = 3, step = cell + gap, left = 30, top = 18;
-    if (!grid.length) return el("div", "empty", "nothing yet");
-    var active = grid.map(function (g) { return g.p; }).filter(function (p) { return p > 0; }).sort(function (a, b) { return a - b; });
-    function q(f) { return active.length ? active[Math.min(active.length - 1, Math.floor(f * active.length))] : 1; }
-    var q50 = q(0.5), q75 = q(0.75), q90 = q(0.9);
-    function level(p) { return !p ? 0 : p >= q90 ? 4 : p >= q75 ? 3 : p >= q50 ? 2 : 1; }
-
-    var first = new Date(grid[0].d + "T00:00:00");
-    var firstCol = (first.getDay() + 6) % 7; // Monday-first rows
-    var weeks = Math.ceil((grid.length + firstCol) / 7);
-    var svg = document.createElementNS(NS, "svg");
-    var width = left + weeks * step;
-    var height = top + 7 * step;
-    svg.setAttribute("viewBox", "0 0 " + width + " " + height);
-    svg.setAttribute("class", "heatmap");
-    svg.setAttribute("role", "img");
-    svg.setAttribute("aria-label", "activity by day");
-
-    ["Mon", "Wed", "Fri"].forEach(function (name, i) {
-      var t = document.createElementNS(NS, "text");
-      t.setAttribute("x", 0);
-      t.setAttribute("y", top + (i * 2) * step + cell - 2);
-      t.setAttribute("class", "hm-label");
-      t.textContent = name;
-      svg.appendChild(t);
-    });
-    var lastMonth = -1;
-    grid.forEach(function (g, i) {
-      var idx = i + firstCol;
-      var col = Math.floor(idx / 7), row = idx % 7;
-      var date = new Date(g.d + "T00:00:00");
-      if (row === 0 && date.getMonth() !== lastMonth) {
-        lastMonth = date.getMonth();
-        var m = document.createElementNS(NS, "text");
-        m.setAttribute("x", left + col * step);
-        m.setAttribute("y", 11);
-        m.setAttribute("class", "hm-label");
-        m.textContent = date.toLocaleString(undefined, { month: "short" });
-        svg.appendChild(m);
-      }
-      var r = document.createElementNS(NS, "rect");
-      r.setAttribute("x", left + col * step);
-      r.setAttribute("y", top + row * step);
-      r.setAttribute("width", cell);
-      r.setAttribute("height", cell);
-      r.setAttribute("rx", 2);
-      r.setAttribute("class", "hm hm" + level(g.p));
-      var title = document.createElementNS(NS, "title");
-      title.textContent = g.d + (g.p ? " · " + g.p + " prompt" + (g.p === 1 ? "" : "s") + " · " + fmtCount(g.t) + " tok" : " · quiet");
-      r.appendChild(title);
-      svg.appendChild(r);
-    });
-    var wrap = el("div", "heatmap-wrap");
-    wrap.appendChild(svg);
-    return wrap;
-  }
-
-  function renderNeeds(items) {
-    var node = $("needs");
-    if (!node) return;
-    clear(node);
-    if (!items.length) return;
-    node.appendChild(el("span", "needs-label", "needs you"));
-    items.forEach(function (item) {
-      var b = el("button", "needs-item", item.title || item.id.slice(0, 8));
-      b.type = "button";
-      b.title = (item.state && item.state.activity) || "";
-      b.addEventListener("click", function () { selectSession(item.id); });
-      node.appendChild(b);
-    });
   }
 
   function startNew(text, attachments) {
@@ -2385,7 +2227,7 @@
     });
 
     $("theme-toggle").addEventListener("click", toggleTheme);
-    document.querySelector(".brand b").addEventListener("click", function () { showHome(); });
+    document.querySelector(".brand b").addEventListener("click", function () { showBoard(); });
     $("new-toggle").addEventListener("click", function () {
       showNew();
       $("sidebar").dataset.open = "false";
@@ -2552,7 +2394,7 @@
     // The text stays in the box until the daemon has it, so a refused or
     // failed send costs nothing but a toast.
     setSending(true);
-    var request = state.view === "home"
+    var request = state.view === "new"
       ? startNew(text, body.attachments)
       : api("/api/message", body);
     request.then(function (r) {
@@ -2607,7 +2449,7 @@
     } else if (ev.key === "n") {
       showNew();
     } else if (ev.key === "h") {
-      showHome();
+      showBoard();
     } else if (ev.key === ".") {
       state.following = true;
       scrollToBottom();
@@ -2619,7 +2461,7 @@
   }
 
   function stepRound(direction) {
-    var nodes = Array.from($("column").children);
+    var nodes = Array.from($("column").querySelectorAll(".round"));
     if (!nodes.length) return;
     var chrome = topbarHeight() + 8;
     var current = nodes.findIndex(function (node) {
@@ -2636,9 +2478,8 @@
   /* ------------------------------------------------------------------ boot */
 
   function fromHash() {
-    if (location.hash === "#/board") return showBoard();
-    if (location.hash === "#/new") return state.view === "home" ? focusComposer() : showNew();
-    if (location.hash === "#/" || location.hash === "") return state.view === "home" ? undefined : showHome();
+    if (location.hash === "#/new") return state.view === "new" ? focusComposer() : showNew();
+    if (location.hash === "#/" || location.hash === "" || location.hash === "#/board") return showBoard();
     var match = /^#\/s\/([\w-]+)$/.exec(location.hash || "");
     if (match && (match[1] !== state.sessionId || state.view === "board")) selectSession(match[1]);
   }
@@ -2719,10 +2560,9 @@
     api("/api/sessions").then(function (data) {
       state.sessions = (data && data.sessions) || [];
       renderSidebar();
-      if (location.hash === "#/board") return showBoard();
       if (location.hash === "#/new") return showNew();
       var match = /^#\/s\/([\w-]+)$/.exec(location.hash || "");
-      if (!match) return showHome();
+      if (!match) return showBoard();
       var wanted = match[1];
       state.sessionId = wanted;
       location.hash = "#/s/" + wanted;

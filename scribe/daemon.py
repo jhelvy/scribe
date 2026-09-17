@@ -1416,21 +1416,6 @@ class Handler(BaseHTTPRequestHandler):
             media_type, data = block
             return self._send(200, data, media_type, {"Cache-Control": "private, max-age=86400"})
 
-        if route == "/api/stats":
-            span = (params.get("range") or ["all"])[0]
-            days = {"7d": 7, "30d": 30, "90d": 90, "365d": 365}.get(span)
-            try:
-                overview = self.hub.search.overview(days)
-            except Exception as exc:
-                return self._json({"error": f"stats unavailable: {exc}"[:200]}, 500)
-            overview["indexing"] = bool(self.hub.search.syncing)
-            overview["needs_you"] = [
-                {"id": c["id"], "title": c["title"], "project": c["project"], "phase": c["phase"], "state": c["state"]}
-                for c in self.hub.index_payload()
-                if c.get("phase") in ("needs_you",)
-            ][:8]
-            return self._json(overview)
-
         if route == "/api/fs":
             raw = (params.get("path") or [""])[0]
             path = os.path.expanduser(raw.strip())
@@ -2205,6 +2190,29 @@ def _hooks_state() -> str:
         return "installed" if install.is_installed() else "not installed  (scribe install)"
     except Exception:
         return "unknown"
+
+
+def open_home() -> int:
+    """Bare `scribe`: the board in a browser, with everything it needs first.
+
+    The first run registers the hooks, so installing the command is the whole
+    setup. The daemon archives every transcript it can see as it starts, so
+    there is no separate backup step either.
+    """
+    from . import install
+
+    if not install.is_installed():
+        sys.stdout.write("first run: registering scribe's hooks with Claude Code\n")
+        install.install()
+        sys.stdout.write("\n")
+    record = ensure_running(open_browser=False)
+    if not record:
+        sys.stderr.write("scribe: could not start the daemon\n")
+        return 1
+    url = record.get("url") or base_url(record)
+    webbrowser.open(url)
+    sys.stdout.write(f"{url}\n")
+    return 0
 
 
 def open_browser_for(session_token: str | None) -> int:
