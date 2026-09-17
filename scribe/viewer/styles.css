@@ -520,7 +520,7 @@ body {
   justify-content: center;
 }
 .stage {
-  padding: 2rem var(--pad) 38vh var(--pad);
+  padding: 2rem var(--pad) 2.5rem var(--pad);
   position: relative;
 }
 .dock-inner { padding: 0 var(--pad); row-gap: 0; }
@@ -633,28 +633,28 @@ pre.code,
 
 .reply { margin-left: 0; }
 
-/* Claude at work: a spark at the foot of the column, turning while a turn is
-   in progress. It is in the column, not the dock, so it sits where the reply
-   will appear. */
+/* Claude's mark at the foot of the column, where the reply appears: still
+   when the conversation rests, turning while a turn is in progress. */
 .working {
   display: flex;
   align-items: center;
-  min-height: 2.75rem;
-  margin: -1.25rem 0 0.5rem;
-  color: var(--ember);
+  min-height: 2.5rem;
+  margin: -1.5rem 0 0;
 }
 .spark {
-  width: 1.65rem;
-  height: 1.65rem;
-  stroke: currentColor;
-  stroke-width: 2.6;
-  stroke-linecap: round;
+  width: 1.75rem;
+  height: 1.75rem;
+  fill: #d97757;
+  transform-origin: center;
+}
+.working[data-busy="true"] .spark {
   animation: spark-turn 2.8s linear infinite, spark-breathe 1.6s ease-in-out infinite;
 }
-@keyframes spark-turn { to { transform: rotate(360deg); } }
+@keyframes spark-turn { to { rotate: 360deg; } }
 @keyframes spark-breathe {
   0%, 100% { opacity: 1; scale: 1; }
   50% { opacity: 0.55; scale: 0.82; }
+}
 }
 
 .md > :first-child { margin-top: 0; }

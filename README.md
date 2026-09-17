@@ -104,7 +104,8 @@ uv tool install git+https://github.com/jhelvy/scribe
 ```
 
 No `uv`? `pipx install git+https://github.com/jhelvy/scribe` does the same.
-Either puts a `scribe` command on your PATH. Then:
+Either puts a `scribe` command on your PATH. Append `@<branch>` to the URL to
+install a branch other than `main`. Then:
 
 ```bash
 scribe
